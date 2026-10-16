@@ -89,6 +89,12 @@ func (m *Moderator) Check(ctx context.Context, text string) (map[string]float64,
 
 // CheckBatch preserves the input order. Google accepts one document per request.
 func (m *Moderator) CheckBatch(ctx context.Context, texts []string) ([]map[string]float64, error) {
+	return m.checkBatch(ctx, texts, nil)
+}
+
+// permit is checked after rate limiting and before every network attempt so
+// revoked policy cannot sit in a pending request through a long wait/retry.
+func (m *Moderator) checkBatch(ctx context.Context, texts []string, permit func() bool) ([]map[string]float64, error) {
 	if len(texts) == 0 {
 		return nil, fmt.Errorf("boş moderation grubu")
 	}
@@ -103,6 +109,9 @@ func (m *Moderator) CheckBatch(ctx context.Context, texts []string) ([]map[strin
 	for attempt := 0; attempt <= m.MaxRetries; attempt++ {
 		if err := m.wait(ctx); err != nil {
 			return nil, err
+		}
+		if permit != nil && !permit() {
+			return nil, fmt.Errorf("moderation grubu gönderilmeden geçersizleşti")
 		}
 		req, err := http.NewRequestWithContext(ctx, "POST", m.URL, bytes.NewReader(body))
 		if err != nil {

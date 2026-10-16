@@ -223,7 +223,7 @@ Dosyanın tam OpenAI örneği:
 | Alan | Örnekteki değer | Açıklama |
 |---|---|---|
 | `server` | `irc.example.com:6697` | IRC adresi ve portu birlikte yazılır. `https://` ekleme. IPv6 adresini `[2001:db8::1]:6697` biçiminde yaz. |
-| `tls` | `true` | Şifreli IRC bağlantısını açar. Port sunucunun TLS portu olmalı; 6697 yaygın bir örnektir. Sertifika doğrulaması yapılır. |
+| `tls` | `true` | Şifreli IRC bağlantısını açar. Port sunucunun TLS portu olmalı; 6697 yaygın bir örnektir. Sertifika doğrulaması yapılır. `false` seçilirse OPER şifresi ve mesajlar IRC bağlantısında şifresiz taşınır. |
 | `server_password` | `""` | Sunucuya bağlanırken istenen ortak bağlantı şifresi. Sunucu istemiyorsa boş bırak. OPER veya NickServ şifresi değildir. |
 | `nick` | `BilgehanBot` | Botun kanalda görünecek takma adı. |
 | `user` | `moderasyon` | IRC bağlantısındaki kullanıcı/ident alanı. Boşluksuz basit bir değer kullan. |
@@ -259,6 +259,8 @@ Dosyanın tam OpenAI örneği:
 | `hosts` | `["203.0.113.7", "guvenilir.example"]` | Tam host/IP muafiyeti. Wildcard ve IP aralığı kabul edilmez. |
 
 Conf içindeki muafiyetler dosyadan yönetilir. Master komutuyla eklenenler SQLite'ta tutulur; yeniden başlatmada korunur. İki kaynak birlikte kullanılır. Master, dosyada tanımlı muafiyeti kaldırmak isterse conf dosyasını düzenlemelidir.
+
+Muafiyet eklenince henüz gönderilmemiş bekleyen gruplar API gönderimi öncesinde tekrar denetlenir. Daha önce sağlayıcıya ulaşmış bir metin geri alınamaz. Aynı host/IP'deki başka bir kişinin geçmişten gelen banı, muaf kullanıcıyı da etkileyebilir.
 
 ### Moderasyon davranışı: `moderation`
 
@@ -438,6 +440,7 @@ Servis için ayrı bir sistem kullanıcısı oluştur ve dosyaları ona ver:
 
 ```sh
 sudo useradd --system --home /opt/IrcModerasyonBotu --shell /usr/sbin/nologin ircmod
+sudo mkdir -p /opt/IrcModerasyonBotu/data
 sudo chown -R ircmod:ircmod /opt/IrcModerasyonBotu
 sudo chmod 600 /opt/IrcModerasyonBotu/bilgehan.conf
 sudo cp deploy/ircmoderasyonbotu.service /etc/systemd/system/
@@ -446,6 +449,8 @@ sudo systemctl enable --now ircmoderasyonbotu
 ```
 
 `ircmod` kullanıcısı zaten varsa `useradd` adımını geç. `enable`, sonraki açılışlarda otomatik başlatmayı; `--now`, hemen başlatmayı sağlar.
+
+Servis dosyası yalnızca `/opt/IrcModerasyonBotu/data` klasörüne yazmaya izin verir. `state_file` yolunu başka bir yere taşırsan servis dosyasındaki `ReadWritePaths` değerini de o klasöre göre düzenleyip `sudo systemctl daemon-reload` çalıştır.
 
 | İşlem | Terminal komutu |
 |---|---|
@@ -520,17 +525,18 @@ API hatası veya zaman aşımında ilgili gruba puan/ceza verilmez. Ağ hatalar�
 
 ## 10. Güncelleme ve geliştirici kontrolleri
 
-Servis kurulmuşsa güncelleme:
+Servis kurulmuşsa güncelleme (komutlardan biri hata verirse devam etme):
 
 ```sh
-sudo systemctl stop ircmoderasyonbotu
 cd /opt/IrcModerasyonBotu
 sudo -u ircmod git pull --ff-only
-sudo -u ircmod env CGO_ENABLED=0 go build -o ircmoderasyonbotu .
+sudo -u ircmod env CGO_ENABLED=0 go build -o ircmoderasyonbotu.new .
+sudo systemctl stop ircmoderasyonbotu
+sudo -u ircmod mv ircmoderasyonbotu.new ircmoderasyonbotu
 sudo systemctl start ircmoderasyonbotu
 ```
 
-`go` komutu sistem kullanıcısının PATH'inde de bulunmalı. Bu adımda `go` bulunamıyorsa `command -v go` ile tam yolunu öğren ve derleme komutundaki `go` yerine o yolu yaz. Yeni sürümün derlemesi başarısız olursa hata çözülmeden güncellemeyi tamamlanmış sayma. Ayar veya veritabanı dosyasını yeniden oluşturma; mevcut dosyalar korunur.
+`go` komutu sistem kullanıcısının PATH'inde de bulunmalı. Bu adımda `go` bulunamıyorsa `command -v go` ile tam yolunu öğren ve derleme komutundaki `go` yerine o yolu yaz. Yeni sürüm önce ayrı dosyaya derlenir; derleme başarısızsa çalışan servis durmaz. `mv` başarısızsa eski program yerinde kalır; `sudo systemctl start ircmoderasyonbotu` ile servisi tekrar başlat. Ayar veya veritabanı dosyasını yeniden oluşturma; mevcut dosyalar korunur.
 
 Kod üzerinde değişiklik yapanlar için, yazılabilir bir proje klasöründe:
 

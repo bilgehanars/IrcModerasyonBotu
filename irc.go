@@ -359,7 +359,14 @@ func (s *Session) checkBatch(batch []Job) {
 		return
 	}
 	ctx, cancel := context.WithDeadline(s.ctx, deadline)
-	scores, e := s.moderator.CheckBatch(ctx, texts)
+	scores, e := s.moderator.checkBatch(ctx, texts, func() bool {
+		for _, j := range valid {
+			if time.Now().After(j.At.Add(time.Duration(c.Moderation.MaxMessageAgeSeconds)*time.Second)) || j.Revision != s.runtime.revision.Load() || s.runtime.exempt(j.Account, j.Host) {
+				return false
+			}
+		}
+		return true
+	})
 	cancel()
 	if e != nil {
 		if s.ctx.Err() == nil {

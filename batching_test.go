@@ -111,3 +111,57 @@ func TestBatchResponseCountAndGoogleDocumentGuard(t *testing.T) {
 		t.Fatal("independent users/channels merged")
 	}
 }
+
+func TestExceptionDuringRateLimitWaitPreventsAPISend(t *testing.T) {
+	c := testConfig(t)
+	store, err := openStore(c.Moderation.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runtime, err := newRuntime(c, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(w, `{"results":[{"category_scores":{"harassment":0.99}}]}`)
+	}))
+	defer server.Close()
+	m := newModerator(c)
+	m.URL, m.Client = server.URL, server.Client()
+	reserved := time.Now().Add(500 * time.Millisecond)
+	m.next = reserved
+	s := &Session{ctx: context.Background(), moderator: m, runtime: runtime, store: store}
+	s.ready.Store(true)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.checkBatch([]Job{{Host: "private.example", Key: hostKey("private.example"), Channel: "#a", Text: "özel mesaj", At: time.Now(), Revision: runtime.revision.Load()}})
+	}()
+	until := time.Now().Add(time.Second)
+	for {
+		m.mu.Lock()
+		enteredWait := m.next.After(reserved)
+		m.mu.Unlock()
+		if enteredWait {
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("worker did not enter rate-limit wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := runtime.exception("master", "host", "private.example", true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("API worker did not finish")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("exception was added before send, yet %d requests were made", requests.Load())
+	}
+}

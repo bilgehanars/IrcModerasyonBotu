@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/opt/IrcModerasyonBotu
+ReadWritePaths=/opt/IrcModerasyonBotu/data
 
 [Install]
 WantedBy=multi-user.target

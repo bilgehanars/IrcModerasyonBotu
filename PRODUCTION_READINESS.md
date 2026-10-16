@@ -14,12 +14,13 @@ Bu rapor uygulamanın test edilen davranışlarını ve gerçek ortamda doğrula
 | IRC gönderimleri | Sınırlı gönderim kuyruğu, güvenli satır uzunluğu ve UTF-8 NOTICE kısaltması. Uzun admin cevapları okuma döngüsünde ağ hız sınırını beklemez. |
 | Master kimliği | Sunucu tarafından doğrulanmış account-tag; nick benzerliği yetki vermez; hesap adı sembolleri RFC1459 nick eşlemesiyle genişletilmez. |
 | Kalıcı ayarlar | SQLite'a yazılmadan değişiklik uygulanmaz. Düzenlenebilir alanlar izin listesiyle sınırlı; anahtarlar IRC komutlarında gösterilmez/değiştirilmez. |
-| Af ve muafiyet yarışı | Politika revizyonu ve eylem kilidi: önceden bekleyen API sonuçları değişiklikten sonra uygulanmaz. |
+| Af ve muafiyet yarışı | Politika revizyonu ve eylem kilidi: önceden bekleyen API sonuçları değişiklikten sonra uygulanmaz. Hız sınırı/tekrar beklemesinden çıkan gruplar ağ gönderimi öncesinde yeniden denetlenir. |
 | Ban geçmişi | Gönderimden önce pending kayıt; geçerli üst basamaklı aktif talep varken daha düşük ban yeniden gönderilmez. Af yalnızca kayıtlı bot taleplerini hedefler. |
 | Deneme modu | Puan kaydı devam eder; gerçek ban/cooldown kaydı oluşturmaz. |
 | SQLite | Transaction, indeksler, foreign key, her bağlantıda busy timeout/foreign key; şema sürümü; süreç kilidi ile aynı veritabanında ikinci bot engellenir. |
 | Conf üretimi | -init; terminalde gizli şifre girişi; 0600 dosya; mevcut dosyayı ezmez; başarısız kurulumda yarım dosya bırakmaz. |
 | Ayar doğrulama | NaN/Inf eşikleri, taşabilecek süreler, aşırı liste/kuyruk boyutları ve kontrol karakterleri reddedilir. |
+| Servis yazma izinleri | Systemd altında yalnızca varsayılan SQLite `data/` klasörüne yazma izni verilir. Alternatif `state_file` konumu için servis ayarı da değişmelidir. |
 
 ## Otomatik doğrulama
 
