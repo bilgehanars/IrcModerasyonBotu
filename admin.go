@@ -51,7 +51,7 @@ func (s *Session) command(m Message) {
 		reply("status | score <host> | list [sayfa] | query <host> [sayfa] | forgive <host> | reset <host>")
 		reply("settings | set <ayar> <değer> | unset <ayar> | except list [sayfa] | except add/del account/host <değer>")
 	case "status":
-		reply(fmt.Sprintf("OPER=%t provider=%s dry_run=%t kuyruk=%d/%d", s.ready.Load(), c.Provider, c.Moderation.DryRun, len(s.queue), cap(s.queue)))
+		reply(fmt.Sprintf("OPER=%t provider=%s dry_run=%t mesaj_kuyrugu=%d/%d grup_kuyrugu=%d/%d", s.ready.Load(), c.Provider, c.Moderation.DryRun, len(s.queue), cap(s.queue), len(s.groups), cap(s.groups)))
 	case "score", "reset", "forgive", "query":
 		if len(parts) < 2 || !validHost(parts[1]) {
 			reply("Tam host/IP belirt; nick veya wildcard kullanma.")

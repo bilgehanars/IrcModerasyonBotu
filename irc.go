@@ -59,10 +59,10 @@ func sender(prefix string) (nick, user, host string) {
 }
 
 type Job struct {
-	Nick, Host, Key, Text string
-	Account               string
-	Revision              uint64
-	At                    time.Time
+	Nick, Host, Key, Channel, Text string
+	Account                        string
+	Revision                       uint64
+	At                             time.Time
 }
 type Session struct {
 	c                        Config
@@ -72,6 +72,7 @@ type Session struct {
 	ctx                      context.Context
 	cancel                   context.CancelFunc
 	queue                    chan Job
+	groups                   chan Job
 	nick                     string
 	accountTag, oper, joined bool
 	runtime                  *Runtime
@@ -281,7 +282,7 @@ func (s *Session) handle(m Message) error {
 			return nil
 		}
 		select {
-		case s.queue <- Job{Nick: nick, Host: host, Key: hostKey(host), Text: text, At: time.Now(), Account: account, Revision: s.runtime.revision.Load()}:
+		case s.queue <- Job{Nick: nick, Host: host, Key: hostKey(host), Channel: fold(m.Params[0]), Text: text, At: time.Now(), Account: account, Revision: s.runtime.revision.Load()}:
 		default:
 			log.Print("Moderation kuyruğu dolu; mesaj atlandı")
 		}
@@ -289,29 +290,88 @@ func (s *Session) handle(m Message) error {
 	return nil
 }
 func (s *Session) worker() {
+	if s.moderator.Provider == "google" {
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case j := <-s.groups:
+				s.checkGroup(j)
+			}
+		}
+	}
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case j := <-s.queue:
-			c := s.runtime.snapshot()
-			deadline := j.At.Add(time.Duration(c.Moderation.MaxMessageAgeSeconds) * time.Second)
-			if time.Now().After(deadline) || j.Revision != s.runtime.revision.Load() || s.runtime.exempt(j.Account, j.Host) {
-				continue
-			}
-			ctx, cancel := context.WithDeadline(s.ctx, deadline)
-			scores, e := s.moderator.Check(ctx, j.Text)
-			cancel()
-			if e != nil {
-				if s.ctx.Err() == nil {
-					log.Printf("Kontrol atlandı: %v", e)
+		case first := <-s.groups:
+			batch := []Job{first}
+			timer := time.NewTimer(150 * time.Millisecond)
+		collect:
+			for len(batch) < 32 {
+				select {
+				case j := <-s.groups:
+					batch = append(batch, j)
+				case <-timer.C:
+					break collect
+				case <-s.ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return
 				}
-				continue
 			}
-			s.enforce(j, scores, deadline)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			s.checkBatch(batch)
 		}
 	}
 }
+
+func (s *Session) checkGroup(j Job) { s.checkBatch([]Job{j}) }
+
+func (s *Session) checkBatch(batch []Job) {
+	c := s.runtime.snapshot()
+	valid := make([]Job, 0, len(batch))
+	texts := make([]string, 0, len(batch))
+	deadline := time.Time{}
+	for _, j := range batch {
+		d := j.At.Add(time.Duration(c.Moderation.MaxMessageAgeSeconds) * time.Second)
+		if time.Now().After(d) || j.Revision != s.runtime.revision.Load() || s.runtime.exempt(j.Account, j.Host) {
+			continue
+		}
+		valid = append(valid, j)
+		texts = append(texts, j.Text)
+		// Keep the request alive for newer groups even if an older group expires.
+		// enforce checks each group's own deadline before awarding points.
+		if deadline.IsZero() || d.After(deadline) {
+			deadline = d
+		}
+	}
+	if len(valid) == 0 || s.ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithDeadline(s.ctx, deadline)
+	scores, e := s.moderator.CheckBatch(ctx, texts)
+	cancel()
+	if e != nil {
+		if s.ctx.Err() == nil {
+			log.Printf("Kontrol atlandı: %v", e)
+		}
+		return
+	}
+	for i, j := range valid {
+		s.enforce(j, scores[i], j.At.Add(time.Duration(c.Moderation.MaxMessageAgeSeconds)*time.Second))
+	}
+}
+
 func (s *Session) enforce(j Job, scores map[string]float64, deadline time.Time) {
 	s.actionMu.Lock()
 	defer s.actionMu.Unlock()
@@ -392,7 +452,7 @@ func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) err
 		HandleNickCollide: func(string) string { return "" },
 	})
 	sessionCtx, cancel := context.WithCancel(ctx)
-	s := &Session{c: c, client: client, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick, runtime: runtime, out: make(chan string, 128), joinedChannels: map[string]bool{}, handshakeDone: make(chan struct{})}
+	s := &Session{c: c, client: client, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), groups: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick, runtime: runtime, out: make(chan string, 128), joinedChannels: map[string]bool{}, handshakeDone: make(chan struct{})}
 	var wg sync.WaitGroup
 	initialized := make(chan struct{})
 	connectDone := make(chan struct{})
@@ -464,7 +524,15 @@ func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) err
 		}
 	}()
 	wg.Add(1)
-	go func() { defer wg.Done(); s.worker() }()
+	go func() { defer wg.Done(); s.aggregate() }()
+	workers := 1
+	if c.Provider == "google" {
+		workers = 4
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.worker() }()
+	}
 	if err = client.Connect(); err != nil {
 		return fmt.Errorf("IRC bağlantısı kesildi veya kurulamadı")
 	}

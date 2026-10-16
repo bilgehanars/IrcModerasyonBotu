@@ -7,6 +7,7 @@ Bu rapor uygulamanın test edilen davranışlarını ve gerçek ortamda doğrula
 | Alan | Düzenleme |
 |---|---|
 | API hız/kota hataları | Dakikalık yerel hız sınırı; 429/5xx/ağ hatalarında sınırlı tekrar; Retry-After beklemesi; mesajın toplam yaş sınırına bağlı iptal. |
+| Yoğun trafik ve bölünmüş satırlar | Kullanıcı/kanal bazında kısa gruplama; satırları tek metin ve tek puan olarak işleme; OpenAI'de ayrı kullanıcı girdilerini en çok 32'li istekte toplama; Google'da dört sınırlı worker. |
 | Geçersiz API yanıtı | Bozuk/aşırı büyük yanıtlar ve aralık dışı skorlar reddedilir. HTTP yönlendirmesi takip edilmez; anahtar başka adrese taşınmaz. |
 | Google uyumluluğu | Native kategori adları; REST v2; API anahtarı HTTP başlığında; desteklenmeyen dil için açık izin gerekir. |
 | IRC başlangıcı | Kayıt, OPER ve JOIN için 45 saniye zaman aşımı; kanal giriş reddinde oturum kapanır; account-tag olmadan moderasyon başlatılmaz. |
@@ -30,7 +31,7 @@ CGO_ENABLED=0 go build -o ircmoderasyonbotu .
 ./ircmoderasyonbotu -config bilgehan.google.conf.example -check
 ```
 
-Testler gerçek API anahtarı kullanmaz. Yerel HTTP sunucuları ve TCP tabanlı IRC taklidi ile provider istekleri, OPER/JOIN/PING, hesap doğrulaması, ceza, af, exception ve kalıcılık kontrol edilir. Sorgular SQL parametreleri kullanır; master için serbest SQL/RAW komut arayüzü yoktur.
+Testler gerçek API anahtarı kullanmaz. Yerel HTTP sunucuları ve TCP tabanlı IRC taklidi ile provider istekleri, OPER/JOIN/PING, hesap doğrulaması, ceza, af, exception ve kalıcılık kontrol edilir. Otuz bağımsız kullanıcının tek OpenAI isteğindeki eşleşmesi ile dörde bölünmüş cümlenin tek puanlanması test edilir. Sorgular SQL parametreleri kullanır; master için serbest SQL/RAW komut arayüzü yoktur.
 
 Bu değişiklikte Go 1.26.9 ile `govulncheck ./...` çalıştırıldı ve bilinen, erişilebilir güvenlik açığı raporlanmadı (`No vulnerabilities found`). Araç zinciri veya bağımlılıklar değiştikçe tarama tekrarlanmalıdır.
 
@@ -41,6 +42,7 @@ Bu değişiklikte Go 1.26.9 ile `govulncheck ./...` çalıştırıldı ve biline
 - KLINE/ZLINE yerel sunucuda etkilidir. Çok sunuculu ağ için global yaptırım uygulanmaz.
 - Kimlik host/IP temellidir. Host değişikliği yeni kayıt, ortak IP ise ortak yaptırım anlamına gelir. Nick/hesap muafiyeti mevcut bir IP banını aşamaz.
 - Bot yalnızca katıldığı kanalları görür. Mesaj kuyruğu dolarsa veya mesaj eskirse kontrol atlanır; tüm mesajların inceleneceği garanti edilmez.
+- Birikmekte olan mesajlar ve API kuyruğu bellektedir; kapanma/yeniden bağlanmada henüz işlenmemiş gruplar kaybolur. SQLite yalnızca verilmiş puanları, ayarları ve ceza geçmişini saklar.
 - Yerel istek sınırı provider token/günlük kotasını ölçmez. API arızasında mesaja puan veya ban verilmez.
 - Google Türkçe kalitesi doğrulanmış destek kapsamında değildir. Native kategoriler OpenAI kategorileriyle eşdeğer değildir. Gerçek hesap/API çağrısı bu ortamda yapılmamıştır.
 - `dry_run: false` ayarını etkinleştirmeden önce kendi kanalındaki yanlış pozitifler ve sunucu yetkileri gözlenmelidir.

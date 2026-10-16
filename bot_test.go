@@ -204,7 +204,7 @@ func TestIRCIntegration(t *testing.T) {
 			rd := bufio.NewReader(conn)
 			read := func() string {
 				t.Helper()
-				conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+				conn.SetReadDeadline(time.Now().Add(6 * time.Second))
 				line, e := rd.ReadString('\n')
 				if e != nil {
 					t.Fatal(e)

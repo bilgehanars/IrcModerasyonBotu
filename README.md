@@ -40,7 +40,7 @@ Anahtarın yerleştirileceği alan:
 
 Anahtar bir şifredir; herkese açık GitHub dosyalarına, ekran görüntülerine veya IRC mesajlarına koyma. Burada kullanılan dosya sunucuda kalır ve Git tarafından yok sayılır.
 
-Bu bot yalnızca **Moderation API** kullanır; bu hizmet ücretsizdir. Ancak istek ve token sınırları vardır. Hesabındaki **Limits** ekranından `omni-moderation` sınırlarını kontrol et. Her kanal mesajı ayrı bir API isteği olarak gönderilir. Token, metnin model tarafından işlenen küçük parçalarına verilen addır; bir token her zaman bir kelimeye eşit değildir.
+Bu bot yalnızca **Moderation API** kullanır; bu hizmet ücretsizdir. Ancak istek ve token sınırları vardır. Hesabındaki **Limits** ekranından `omni-moderation` sınırlarını kontrol et. Aynı kullanıcının kısa aralıkla gönderdiği satırlar bir metin olarak değerlendirilir; OpenAI'de farklı kullanıcıların metinleri bir istekte ayrı girdiler olarak gönderilebilir. İstek sayısı azalır, fakat metinlerin toplam token tüketimi ortadan kalkmaz. Token, metnin model tarafından işlenen küçük parçalarına verilen addır; bir token her zaman bir kelimeye eşit değildir.
 
 Resmî kaynaklar: [OpenAI API başlangıç rehberi](https://developers.openai.com/api/docs/quickstart), [Moderation API](https://developers.openai.com/api/docs/guides/moderation), [model ve kullanım sınırları](https://developers.openai.com/api/docs/models/omni-moderation-latest).
 
@@ -267,8 +267,8 @@ Conf içindeki muafiyetler dosyadan yönetilir. Master komutuyla eklenenler SQLi
 | `requests_per_minute` | `60` | API isteklerinin yerel dakika sınırı. Tekrar denemeleri de kapsar. Sağlayıcının token/günlük kotasının yerine geçmez. 1–10.000 arasında olmalı. |
 | `max_retries` | `2` | İlk denemeden sonraki ek deneme sayısı. Ağ hataları, HTTP 429 ve 5xx için kullanılır. 0–5 arasında olmalı; 0 tekrar denemeyi kapatır. |
 | `dry_run` | `true` | Deneme modu. `true` iken API kontrolleri ve puan kaydı çalışır; ban komutları yalnızca loga yazılır. `false` iken ban talepleri IRC sunucusuna gönderilir. |
-| `queue_size` | `200` | API kontrolü için bellekte bekleyebilecek mesaj sayısı. 1–10.000 arasında olmalı. Bu değer API limitini artırmaz. Kuyruk dolarsa yeni mesaj atlanır. |
-| `max_message_age_seconds` | `30` | Kontrol sırasında bu yaştan daha eski hale gelen mesaj atlanır. Saniye cinsindedir. |
+| `queue_size` | `200` | Gelen mesaj ve hazır grup kuyruklarının ayrı ayrı kapasitesi; bekleyen kullanıcı grubu sayısı da bu değerle sınırlandırılır. 1–10.000 arasında olmalı. Kuyruk dolarsa yeni mesaj/grup atlanabilir. |
+| `max_message_age_seconds` | `30` | Grubun ilk satırından itibaren kontrol/ceza için en uzun süre. Süre dolan grup atlanır. Saniye cinsindedir. |
 | `score_window_hours` | `24` | Puan hesabına katılacak geçmiş süre. Örnekte son 24 saatin ihlalleri toplanır. 1–8.760 arasında olmalı. |
 | `action_cooldown_seconds` | `3600` | Aynı veya daha düşük ceza basamağının yeniden gönderilmesi için beklenecek süre. Örnekte 1 saat. Daha yüksek basamağa geçiş beklemez. Banın süresini belirlemez. |
 | `state_file` | `data/scores.db` | SQLite veritabanı dosyasının yolu. Klasör ve tablolar otomatik oluşturulur; ayrı SQLite sunucusu veya elle tablo kurulumu gerekmez. |
@@ -299,9 +299,9 @@ Göreli yollar botun çalıştırıldığı klasöre göre çözülür. Örneği
 | `violence` | Şiddet içeren anlatım | 0.90 | 3 |
 | `violence/graphic` | Ayrıntılı/ağır şiddet tasviri | 0.90 | 4 |
 
-Aynı mesaj birden fazla kategoriye girerse **yalnızca en yüksek puan** eklenir. Örneğin aynı mesaj hem 2 hem 6 puanlık kuralı tetiklerse toplam 6 puan yazılır. Kategorilerden birini denetlemek istemiyorsan ilgili satırı kaldırabilirsin; en az bir kural bulunmalı.
+Aynı mesaj grubu birden fazla kategoriye girerse **yalnızca en yüksek puan** eklenir. Örneğin aynı grup hem 2 hem 6 puanlık kuralı tetiklerse toplam 6 puan yazılır. Kategorilerden birini denetlemek istemiyorsan ilgili satırı kaldırabilirsin; en az bir kural bulunmalı.
 
-Model şaka, alıntı veya haber içeriğini de bir kategoriye yerleştirebilir. Bot her mesajı tek başına gönderir; önceki sohbeti yorumlamaz. Eşikleri kendi kanalındaki deneme sonuçlarına göre ayarla.
+Bot aynı nick/host/hesabın aynı kanaldaki satırlarını son satırdan sonra 3 saniye sessizlikte, ilk satırdan en geç 10 saniyede, 8 satırda veya 1.500 baytta kapatır. Satırları yeni satırla birleştirerek **grup başına tek puan** verir. Örneğin `ben`, `senin`, `ananı`, `sikeyim` art arda gönderilirse tek metin olur. Başka kullanıcılar ve kanallar karıştırılmaz; uzun süreli sohbet geçmişi eklenmez. OpenAI hazır grupları en çok 32 ayrı girdiyle, en çok 150 ms ek beklemeyle bir HTTP isteğine toplar. Google tek belge kabul ettiğinden gruplar ayrı isteklere, en çok dört eşzamanlı çalışan üzerinden gider. Model şaka, alıntı veya haber içeriğini de bir kategoriye yerleştirebilir; eşikleri kendi kanalındaki deneme sonuçlarına göre ayarla.
 
 ### Ceza basamakları: `penalties`
 
@@ -376,7 +376,7 @@ Deneme modunda puanlar veritabanına yazılır; simülasyon gerçek ban/cooldown
 | Komut | Sonuç |
 |---|---|
 | `/msg BilgehanBot help` | Komutları listeler. |
-| `/msg BilgehanBot status` | OPER, sağlayıcı, deneme modu ve kuyruk durumu. |
+| `/msg BilgehanBot status` | OPER, sağlayıcı, deneme modu, gelen mesaj ve hazır grup kuyrukları. Henüz biriken gruplar bu iki sayaca dahil değildir. |
 | `/msg BilgehanBot score 203.0.113.7` | Zaman penceresi içindeki toplam puan. |
 | `/msg BilgehanBot list 1` | En yüksek puanlı host/IP kayıtlarının ilk sayfası. Sayfa başına 10 kayıt. |
 | `/msg BilgehanBot query 203.0.113.7 1` | Bu host/IP için kayıtlı son ihlaller: UTC zaman, kategori ve puan. SQL metni çalıştırmaz. |
@@ -516,7 +516,7 @@ Bu örnek aynı isimli eski yedeğin üzerine yazar; farklı tarihler için fark
 | Ban gönderilmiş görünüyor ama uygulanmıyor | Sunucunun KLINE/ZLINE desteğini, OPER izinlerini ve tam host eşleşmesini sunucu tarafında kontrol et. |
 | SQLite/dosya izin hatası | Botu çalıştıran kullanıcının `data` klasörüne yazabildiğini kontrol et. Servis kurulumunda kullanıcı `ircmod` olur. |
 
-API hatası veya zaman aşımında ilgili mesaja puan/ceza verilmez. Ağ hataları, HTTP 429 ve 5xx sınırlı sayıda yeniden denenir. 429 yanıtındaki `Retry-After` dikkate alınır; bekleme en fazla 120 saniyeye sınırlandırılır ve mesajın yaş/deadline sınırı yine geçerlidir. `requests_per_minute` her isteği sınırlar; günlük/token kotası sağlayıcı panelinden takip edilmelidir. Kuyruk büyüklüğü bir API hız sınırı değildir.
+API hatası veya zaman aşımında ilgili gruba puan/ceza verilmez. Ağ hataları, HTTP 429 ve 5xx sınırlı sayıda yeniden denenir. 429 yanıtındaki `Retry-After` dikkate alınır; bekleme en fazla 120 saniyeye sınırlandırılır ve grubun yaş/deadline sınırı yine geçerlidir. `requests_per_minute` her HTTP isteğini sınırlar; günlük/token kotası sağlayıcı panelinden takip edilmelidir. Kuyruk ve birikmekte olan metinler bellektedir: bot kapanıp yeniden açılırsa gönderilmemiş gruplar kaybolur.
 
 ## 10. Güncelleme ve geliştirici kontrolleri
 
@@ -545,7 +545,7 @@ IRC bağlantı/protokol işlemleri [girc](https://github.com/lrstanley/girc), SQ
 
 ## Verilerin işlenmesi ve kaynaklar
 
-Denetlenen kanal mesajının metni seçilen OpenAI veya Google API'ye gönderilir; önceki sohbet geçmişi eklenmez. Mesaj içerikleri botun loguna veya SQLite'a yazılmaz. Host/IP, kategori ve puanlar loglarda; host/IP ile puan/ceza zamanları veritabanında bulunur. API anahtarı ve OPER şifresi bot tarafından loglanmaz.
+Denetlenen kanal mesajları aynı kullanıcı/kanal için kısa süre birleştirilerek seçilen OpenAI veya Google API'ye gönderilir; uzun süreli sohbet geçmişi eklenmez. Mesaj içerikleri botun loguna veya SQLite'a yazılmaz. Host/IP, kategori ve puanlar loglarda; host/IP ile puan/ceza zamanları veritabanında bulunur. API anahtarı ve OPER şifresi bot tarafından loglanmaz.
 
 - [OpenAI API başlangıç rehberi](https://developers.openai.com/api/docs/quickstart)
 - [OpenAI API kimlik doğrulaması](https://developers.openai.com/api/reference/overview)

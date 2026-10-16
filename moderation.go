@@ -80,9 +80,24 @@ func retryDelay(header string, attempt int) time.Duration {
 	return d
 }
 func (m *Moderator) Check(ctx context.Context, text string) (map[string]float64, error) {
-	var payload any = map[string]string{"model": m.Model, "input": text}
+	results, err := m.CheckBatch(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return results[0], nil
+}
+
+// CheckBatch preserves the input order. Google accepts one document per request.
+func (m *Moderator) CheckBatch(ctx context.Context, texts []string) ([]map[string]float64, error) {
+	if len(texts) == 0 {
+		return nil, fmt.Errorf("boş moderation grubu")
+	}
+	if m.Provider == "google" && len(texts) != 1 {
+		return nil, fmt.Errorf("Google tek belge kabul eder")
+	}
+	var payload any = map[string]any{"model": m.Model, "input": texts}
 	if m.Provider == "google" {
-		payload = map[string]any{"document": map[string]string{"type": "PLAIN_TEXT", "content": text}, "modelVersion": "MODEL_VERSION_1"}
+		payload = map[string]any{"document": map[string]string{"type": "PLAIN_TEXT", "content": texts[0]}, "modelVersion": "MODEL_VERSION_1"}
 	}
 	body, _ := json.Marshal(payload)
 	for attempt := 0; attempt <= m.MaxRetries; attempt++ {
@@ -137,12 +152,21 @@ func (m *Moderator) Check(ctx context.Context, text string) (map[string]float64,
 		if err != nil || len(data) > 1<<20 {
 			return nil, fmt.Errorf("moderation yanıtı okunamadı veya fazla büyük")
 		}
-		return m.decode(data)
+		return m.decodeBatch(data, len(texts))
 	}
 	return nil, fmt.Errorf("moderation denemeleri tükendi")
 }
 func (m *Moderator) decode(data []byte) (map[string]float64, error) {
+	r, err := m.decodeBatch(data, 1)
+	if err != nil {
+		return nil, err
+	}
+	return r[0], nil
+}
+
+func (m *Moderator) decodeBatch(data []byte, count int) ([]map[string]float64, error) {
 	scores := map[string]float64{}
+	results := make([]map[string]float64, 0, count)
 	if m.Provider == "google" {
 		var r struct {
 			Categories []struct {
@@ -175,20 +199,27 @@ func (m *Moderator) decode(data []byte) (map[string]float64, error) {
 				Scores map[string]float64 `json:"category_scores"`
 			} `json:"results"`
 		}
-		if json.Unmarshal(data, &r) != nil || len(r.Results) != 1 {
+		if json.Unmarshal(data, &r) != nil || len(r.Results) != count {
 			return nil, fmt.Errorf("OpenAI yanıtı çözülemedi")
 		}
-		scores = r.Results[0].Scores
-	}
-	if len(scores) == 0 {
-		return nil, fmt.Errorf("moderation sonucu eksik")
-	}
-	for k, v := range scores {
-		if strings.TrimSpace(k) == "" || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
-			return nil, fmt.Errorf("geçersiz moderation skoru")
+		for _, item := range r.Results {
+			results = append(results, item.Scores)
 		}
 	}
-	return scores, nil
+	if m.Provider == "google" {
+		results = append(results, scores)
+	}
+	for _, scores := range results {
+		if len(scores) == 0 {
+			return nil, fmt.Errorf("moderation sonucu eksik")
+		}
+		for k, v := range scores {
+			if strings.TrimSpace(k) == "" || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+				return nil, fmt.Errorf("geçersiz moderation skoru")
+			}
+		}
+	}
+	return results, nil
 }
 func scoreMessage(rules map[string]Rule, scores map[string]float64) (int, string) {
 	points, category := 0, ""
