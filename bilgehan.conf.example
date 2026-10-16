@@ -1,4 +1,5 @@
 {
+  "provider": "openai",
   "irc": {
     "server": "irc.example.com:6697",
     "tls": true,
@@ -8,8 +9,12 @@
     "real_name": "Bilgehan Moderasyon Botu",
     "oper_name": "BOT_OPER_ADI",
     "oper_password": "OPER_SIFRESI",
-    "channels": ["#sohbet"],
-    "owner_accounts": ["bilgehan"],
+    "channels": [
+      "#sohbet"
+    ],
+    "owner_accounts": [
+      "bilgehan"
+    ],
     "reconnect_min_seconds": 3,
     "reconnect_max_seconds": 60
   },
@@ -27,17 +32,58 @@
     "state_file": "data/scores.db",
     "reason": "Otomatik moderasyon: tekrar eden kural ihlali",
     "rules": {
-      "harassment": {"threshold": 0.85, "points": 2},
-      "harassment/threatening": {"threshold": 0.85, "points": 6},
-      "hate": {"threshold": 0.85, "points": 4},
-      "hate/threatening": {"threshold": 0.85, "points": 8},
-      "violence": {"threshold": 0.90, "points": 3},
-      "violence/graphic": {"threshold": 0.90, "points": 4}
+      "harassment": {
+        "threshold": 0.85,
+        "points": 2
+      },
+      "harassment/threatening": {
+        "threshold": 0.85,
+        "points": 6
+      },
+      "hate": {
+        "threshold": 0.85,
+        "points": 4
+      },
+      "hate/threatening": {
+        "threshold": 0.85,
+        "points": 8
+      },
+      "violence": {
+        "threshold": 0.9,
+        "points": 3
+      },
+      "violence/graphic": {
+        "threshold": 0.9,
+        "points": 4
+      }
     },
     "penalties": [
-      {"points": 10, "command": "KLINE", "duration": "30m"},
-      {"points": 20, "command": "KLINE", "duration": "24h"},
-      {"points": 35, "command": "KLINE", "duration": "0"}
-    ]
+      {
+        "points": 10,
+        "command": "KLINE",
+        "duration": "30m"
+      },
+      {
+        "points": 20,
+        "command": "KLINE",
+        "duration": "24h"
+      },
+      {
+        "points": 35,
+        "command": "KLINE",
+        "duration": "0"
+      }
+    ],
+    "requests_per_minute": 60,
+    "max_retries": 2
+  },
+  "google": {
+    "api_key": "",
+    "timeout_seconds": 15,
+    "allow_unsupported_language": false
+  },
+  "exceptions": {
+    "accounts": [],
+    "hosts": []
   }
 }

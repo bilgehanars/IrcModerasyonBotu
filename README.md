@@ -2,7 +2,7 @@
 
 IRC kanallarındaki mesajları denetleyen, tekrar eden ihlallere puan veren ve belirlenen puana ulaşıldığında kullanıcıya sunucu yasağı uygulayan Go botu.
 
-Bot kanala bir IRC kullanıcısı gibi bağlanır. Mesajları OpenAI Moderation API'ye gönderir; taciz, nefret söylemi, tehdit ve şiddet kategorileri için gelen sonuçları yapılandırdığın kurallarla değerlendirir. Puanlar SQLite veritabanında saklanır. Bağlantı kesilirse yeniden bağlanır, OPER girişi yapar ve kanallara tekrar katılır.
+Bot kanala bir IRC kullanıcısı gibi bağlanır. Mesajları seçilen OpenAI veya Google Cloud moderasyon API'sine gönderir; taciz, nefret söylemi, tehdit ve şiddet kategorileri için gelen sonuçları yapılandırdığın kurallarla değerlendirir. Puanlar SQLite veritabanında saklanır. Bağlantı kesilirse yeniden bağlanır, OPER girişi yapar ve kanallara tekrar katılır.
 
 **Bu rehber Ubuntu/Debian tabanlı Linux sunucular için hazırlanmıştır. Ceza komutlarının biçimi UnrealIRCd içindir.** Başka bir IRC sunucusu yazılımı kullanıyorsan KLINE/ZLINE desteğini ve sözdizimini ayrıca kontrol et.
 
@@ -17,7 +17,7 @@ Bot kanala bir IRC kullanıcısı gibi bağlanır. Mesajları OpenAI Moderation 
 | IRC sunucu adresi ve portu | Botun hangi IRC sunucusuna bağlanacağını belirler. |
 | OPER hesabı ve şifresi | Botun sunucuda KLINE/ZLINE uygulayabilmesi için gerekir. Kanal operatörlüğü yeterli değildir. |
 | Kendi IRC hesap adın | Botun yönetim komutlarını kimin kullanabileceğini belirler. |
-| OpenAI API anahtarı | Botun mesajları Moderation API'ye göndermesini sağlar. |
+| Seçilen sağlayıcının API anahtarı | OpenAI Moderation veya Google Cloud Natural Language erişimi sağlar. |
 
 OPER hesabını IRC sunucusunun yöneticisi oluşturur. Bu bot OPER hesabı oluşturmaz. Hesaba kullanacağın KLINE/ZLINE yetkileri verilmiş olmalı. Bot yalnızca katıldığı kanallarda görebildiği mesajları kontrol eder; tüm ağdaki mesajları otomatik olarak göremez.
 
@@ -43,6 +43,24 @@ Anahtar bir şifredir; herkese açık GitHub dosyalarına, ekran görüntülerin
 Bu bot yalnızca **Moderation API** kullanır; bu hizmet ücretsizdir. Ancak istek ve token sınırları vardır. Hesabındaki **Limits** ekranından `omni-moderation` sınırlarını kontrol et. Her kanal mesajı ayrı bir API isteği olarak gönderilir. Token, metnin model tarafından işlenen küçük parçalarına verilen addır; bir token her zaman bir kelimeye eşit değildir.
 
 Resmî kaynaklar: [OpenAI API başlangıç rehberi](https://developers.openai.com/api/docs/quickstart), [Moderation API](https://developers.openai.com/api/docs/guides/moderation), [model ve kullanım sınırları](https://developers.openai.com/api/docs/models/omni-moderation-latest).
+
+### Google Cloud seçeneği
+
+Google için **Cloud Natural Language API** kullanılır. Perspective API 31 Aralık 2026'da kapanacağı için bu projeye eklenmemiştir. [Duyuru](https://www.perspectiveapi.com/).
+
+1. [Google Cloud Console](https://console.cloud.google.com/) üzerinden bir proje seç veya oluştur.
+2. Projenin faturalandırmasını etkinleştir; Cloud Natural Language API kullanımının [ücretlendirmesini](https://cloud.google.com/products/natural-language/pricing) incele. OpenAI'nin ücretsiz Moderation hizmetiyle aynı ücret modeli değildir.
+3. API kitaplığında **Cloud Natural Language API** (`language.googleapis.com`) hizmetini etkinleştir.
+4. **APIs & Services → Credentials** bölümünden bir API anahtarı oluştur. API kısıtlamasını Cloud Natural Language API ile sınırla; sunucun sabit IP kullanıyorsa IP kısıtlaması da uygulayabilirsin.
+5. Kurulum sihirbazında `google` seç veya `bilgehan.google.conf.example` dosyasını kopyala. Anahtarı `google.api_key` alanına yaz. OpenAI anahtarı gerekmez.
+
+Bot anahtarı URL'ye eklemez; `X-Goog-Api-Key` başlığında gönderir. Google REST v2 `documents:moderateText`, `MODEL_VERSION_1` kullanılır.
+
+Google'ın moderasyon dil listesinde Türkçe için doğrulanmış destek bulunmuyor. Bot, API `languageSupported: false` döndürdüğünde varsayılan olarak sonucu kullanmaz ve puan vermez. Deneme sonuçlarını kendin değerlendirerek `google.allow_unsupported_language: true` seçebilirsin; bu ayar dil kalitesini iyileştirmez, yalnızca doğrulanmamış sonucu kullanmaya izin verir.
+
+Sağlayıcıların kategorileri birebir aynı değildir. Google örneği `Toxic`, `Insult`, `Derogatory` ve `Violent` kullanır; ayrıca `Profanity` kuralı eklenebilir. OpenAI'deki ayrı tehdit kategorilerini Google adına taklit etmez. Google'a geçerken yalnızca `provider` alanını değiştirme; Google kural listesini de kullan. Sihirbaz doğru kuralları hazırlar.
+
+Kaynaklar: [Google kurulum](https://docs.cloud.google.com/natural-language/docs/setup), [API anahtarı kullanımı](https://docs.cloud.google.com/docs/authentication/api-keys-use), [kategori ve dil desteği](https://docs.cloud.google.com/natural-language/docs/moderating-text), [REST v2](https://docs.cloud.google.com/natural-language/docs/reference/rest/v2/documents/moderateText).
 
 ## 3. Sunucuyu hazırlama ve projeyi indirme
 
@@ -75,7 +93,18 @@ Git, proje için bir klasör oluşturur. Sonraki komutları bu klasörün içind
 
 **Projede `.env` dosyası kullanılmaz. Ayarların tamamı `bilgehan.conf` dosyasından okunur.** `OPENAI_API_KEY` ortam değişkeni tanımlamak da bu sürümde dosyanın yerini almaz.
 
-Örnek dosyayı kopyala ve düzenle:
+En kolay yöntem, önce programı derleyip kurulum sihirbazını çalıştırmaktır:
+
+```sh
+go mod download
+CGO_ENABLED=0 go build -o ircmoderasyonbotu .
+./ircmoderasyonbotu -init -config bilgehan.conf
+./ircmoderasyonbotu -config bilgehan.conf -check
+```
+
+Sihirbaz sağlayıcıyı, IRC adresini, bot nickini, OPER bilgilerini, kanalları, master hesaplarını ve API anahtarını sorar. Gerçek terminalde şifre girişleri görünmez. TLS ve deneme modu açık başlar; ayrıntılı eşikler sonradan düzenlenebilir. Mevcut dosyanın üzerine yazmaz. Yarım kalan veya geçersiz kurulumda dosya oluşturmaz. Şifre sorularına Enter ile geçmeden gerekli değeri yaz.
+
+Elle düzenlemeyi tercih edersen OpenAI için örnek dosyayı kopyala:
 
 ```sh
 cp bilgehan.conf.example bilgehan.conf
@@ -83,14 +112,17 @@ chmod 600 bilgehan.conf
 nano bilgehan.conf
 ```
 
+Google için `cp bilgehan.google.conf.example bilgehan.conf` kullan. Sihirbazla dosya oluşturduysan tekrar `cp` çalıştırma; doğrudan `nano bilgehan.conf` ile düzenle.
+
 `chmod 600`, dosyayı yalnızca sahibinin okuyup yazabilmesini sağlar. Nano'da kaydetmek için **Ctrl+O**, ardından **Enter**; çıkmak için **Ctrl+X** kullan.
 
 Dosya **JSON** biçimindedir. Alan adlarını ve metinlerin çevresindeki çift tırnakları koru. `true`/`false` değerlerini tırnak içine alma. Son alandan sonra virgül ekleme; dosyaya `#` veya `//` ile yorum yazma.
 
-Dosyanın tam örneği:
+Dosyanın tam OpenAI örneği:
 
 ```json
 {
+  "provider": "openai",
   "irc": {
     "server": "irc.example.com:6697",
     "tls": true,
@@ -100,8 +132,12 @@ Dosyanın tam örneği:
     "real_name": "Bilgehan Moderasyon Botu",
     "oper_name": "BOT_OPER_ADI",
     "oper_password": "OPER_SIFRESI",
-    "channels": ["#sohbet"],
-    "owner_accounts": ["bilgehan"],
+    "channels": [
+      "#sohbet"
+    ],
+    "owner_accounts": [
+      "bilgehan"
+    ],
     "reconnect_min_seconds": 3,
     "reconnect_max_seconds": 60
   },
@@ -119,23 +155,68 @@ Dosyanın tam örneği:
     "state_file": "data/scores.db",
     "reason": "Otomatik moderasyon: tekrar eden kural ihlali",
     "rules": {
-      "harassment": {"threshold": 0.85, "points": 2},
-      "harassment/threatening": {"threshold": 0.85, "points": 6},
-      "hate": {"threshold": 0.85, "points": 4},
-      "hate/threatening": {"threshold": 0.85, "points": 8},
-      "violence": {"threshold": 0.90, "points": 3},
-      "violence/graphic": {"threshold": 0.90, "points": 4}
+      "harassment": {
+        "threshold": 0.85,
+        "points": 2
+      },
+      "harassment/threatening": {
+        "threshold": 0.85,
+        "points": 6
+      },
+      "hate": {
+        "threshold": 0.85,
+        "points": 4
+      },
+      "hate/threatening": {
+        "threshold": 0.85,
+        "points": 8
+      },
+      "violence": {
+        "threshold": 0.9,
+        "points": 3
+      },
+      "violence/graphic": {
+        "threshold": 0.9,
+        "points": 4
+      }
     },
     "penalties": [
-      {"points": 10, "command": "KLINE", "duration": "30m"},
-      {"points": 20, "command": "KLINE", "duration": "24h"},
-      {"points": 35, "command": "KLINE", "duration": "0"}
-    ]
+      {
+        "points": 10,
+        "command": "KLINE",
+        "duration": "30m"
+      },
+      {
+        "points": 20,
+        "command": "KLINE",
+        "duration": "24h"
+      },
+      {
+        "points": 35,
+        "command": "KLINE",
+        "duration": "0"
+      }
+    ],
+    "requests_per_minute": 60,
+    "max_retries": 2
+  },
+  "google": {
+    "api_key": "",
+    "timeout_seconds": 15,
+    "allow_unsupported_language": false
+  },
+  "exceptions": {
+    "accounts": [],
+    "hosts": []
   }
 }
 ```
 
 İlk çalıştırmadan önce sunucu adresini, OPER bilgilerini, kanal listesini, sahip hesap adını ve OpenAI API anahtarını kendine göre değiştir. İlk deneme için `dry_run` değeri `true` kalsın.
+
+### Sağlayıcı: `provider`
+
+`"openai"` veya `"google"` seçilir. Yalnızca seçilen sağlayıcının anahtarı gerekir; otomatik olarak diğer sağlayıcıya geçilmez. Sağlayıcı/anahtar değişikliği için dosyayı düzenle ve botu yeniden başlat.
 
 ### IRC bağlantısı: `irc`
 
@@ -162,10 +243,29 @@ Dosyanın tam örneği:
 | `model` | `omni-moderation-latest` | Kullanılacak moderasyon modeli. İlk kurulumda bu değeri kullan. |
 | `timeout_seconds` | `15` | Bir API isteğinin en fazla kaç saniye bekleneceği. 1–120 arasında olmalı. Zaman aşımında ilgili mesaja puan verilmez. |
 
+### Google bağlantısı: `google`
+
+| Alan | Örnek | Açıklama |
+|---|---|---|
+| `api_key` | `GOOGLE_CLOUD_API_ANAHTARINI_YAZ` | Natural Language API için oluşturulan Google Cloud anahtarı. `provider: "google"` olduğunda gerekir. |
+| `timeout_seconds` | `15` | Tek bir Google HTTP isteğinin zaman aşımı; 1–120 saniye. |
+| `allow_unsupported_language` | `false` | API dilin desteklenmediğini bildirirse sonucu kullanma. `true`, bu sonuçlara açıkça izin verir. Türkçe için deneme yapmadan canlı yaptırım açma. |
+
+### Başlangıç muafiyetleri: `exceptions`
+
+| Alan | Örnek | Açıklama |
+|---|---|---|
+| `accounts` | `["guvenilirhesap"]` | Doğrulanmış hesap adlarının mesajları API'ye gönderilmez ve puan almaz. |
+| `hosts` | `["203.0.113.7", "guvenilir.example"]` | Tam host/IP muafiyeti. Wildcard ve IP aralığı kabul edilmez. |
+
+Conf içindeki muafiyetler dosyadan yönetilir. Master komutuyla eklenenler SQLite'ta tutulur; yeniden başlatmada korunur. İki kaynak birlikte kullanılır. Master, dosyada tanımlı muafiyeti kaldırmak isterse conf dosyasını düzenlemelidir.
+
 ### Moderasyon davranışı: `moderation`
 
 | Alan | Örnekteki değer | Açıklama |
 |---|---|---|
+| `requests_per_minute` | `60` | API isteklerinin yerel dakika sınırı. Tekrar denemeleri de kapsar. Sağlayıcının token/günlük kotasının yerine geçmez. 1–10.000 arasında olmalı. |
+| `max_retries` | `2` | İlk denemeden sonraki ek deneme sayısı. Ağ hataları, HTTP 429 ve 5xx için kullanılır. 0–5 arasında olmalı; 0 tekrar denemeyi kapatır. |
 | `dry_run` | `true` | Deneme modu. `true` iken API kontrolleri ve puan kaydı çalışır; ban komutları yalnızca loga yazılır. `false` iken ban talepleri IRC sunucusuna gönderilir. |
 | `queue_size` | `200` | API kontrolü için bellekte bekleyebilecek mesaj sayısı. 1–10.000 arasında olmalı. Bu değer API limitini artırmaz. Kuyruk dolarsa yeni mesaj atlanır. |
 | `max_message_age_seconds` | `30` | Kontrol sırasında bu yaştan daha eski hale gelen mesaj atlanır. Saniye cinsindedir. |
@@ -176,7 +276,7 @@ Dosyanın tam örneği:
 | `rules` | Kategori listesi | Hangi kategoriye, hangi güven eşiğinde, kaç puan verileceğini belirler. Aşağıda açıklanıyor. |
 | `penalties` | Ceza basamakları | Toplam puana göre komut ve ban süresini belirler. Aşağıda açıklanıyor. |
 
-Göreli yollar botun çalıştırıldığı klasöre göre çözülür. Örneğin proje klasöründeyken çalıştırırsan veritabanı o klasördeki `data/scores.db` dosyası olur. Ayarlar başlangıçta okunur; değişiklikten sonra botu yeniden başlat.
+Göreli yollar botun çalıştırıldığı klasöre göre çözülür. Örneğin proje klasöründeyken çalıştırırsan veritabanı o klasördeki `data/scores.db` dosyası olur. Conf ayarları başlangıçta okunur; dosyadaki değişiklikten sonra botu yeniden başlat. Master komutuyla izinli ayar değişiklikleri hemen uygulanır.
 
 ### Kategori eşikleri ve puanlar: `rules`
 
@@ -259,29 +359,55 @@ Kendi IRC istemcinde, `owner_accounts` listesinde yazan hesabına sunucunun giri
 
 Botun nickini değiştirdiysen komutlardaki `BilgehanBot` yerine yeni nicki yaz. Bot NOTICE mesajı ile cevap verir.
 
-Sahip kontrolü, sunucunun gönderdiği IRCv3 `account-tag` bilgisine dayanır. Sadece `bilgehan` nickini almak yetki sağlamaz. Sunucu bu özelliği desteklemiyorsa yönetim komutları çalışmaz; kanal mesajlarının denetlenmesi devam eder.
+Sahip kontrolü, sunucunun gönderdiği IRCv3 `account-tag` bilgisine dayanır. Sadece `bilgehan` nickini almak yetki sağlamaz. Sunucu bu özelliği desteklemiyorsa bot güvenli master doğrulaması yapamayacağı için oturumu kapatır; moderasyon başlatılmaz.
 
 Doğrulanmış sahip hesabının kanal mesajları denetimden muaftır. Moderasyonu deneyeceksen ikinci bir test hesabı kullan.
 
 ### Gerçek banları etkinleştirme
 
-Deneme sonuçlarını ve sunucunun ban davranışını kontrol ettikten sonra botu durdur. `bilgehan.conf` içindeki `dry_run` değerini `false` yap ve yeniden başlat.
+Deneme sonuçlarını ve sunucunun ban davranışını kontrol ettikten sonra `/msg BilgehanBot set dry_run false` ile canlı yaptırımı açabilirsin. Dosyadan yönetiyorsan botu durdur, `bilgehan.conf` içindeki `dry_run` değerini `false` yap ve yeniden başlat. Master daha önce bu ayarı değiştirdiyse SQLite değeri önceliklidir; dosyaya dönmek için `unset dry_run` kullan.
 
-Deneme modunda da puanlar ve son simülasyon basamağı veritabanına yazılır. Deneme yaptığın host/IP için aşağıdaki `reset` komutunu kullanarak bu geçmişi temizleyebilirsin.
+Deneme modunda puanlar veritabanına yazılır; simülasyon gerçek ban/cooldown kaydı oluşturmaz. Deneme yaptığın host/IP için aşağıdaki `reset` komutunu kullanarak bu geçmişi temizleyebilirsin.
 
-## 6. Sahip komutları ve kullanıcı takibi
+## 6. Master komutları
 
-| IRC istemcisine yazılacak komut | Sonuç |
+`irc.owner_accounts` içindeki hesaplar master yetkisine sahiptir. Komutlar yalnızca botun özel mesajında ve sunucunun doğruladığı `account-tag` üzerinden kabul edilir. Aşağıdaki `203.0.113.7` ve hesap adlarını gerçek hedefle değiştir.
+
+| Komut | Sonuç |
 |---|---|
-| `/msg BilgehanBot help` | Kullanılabilen komutları listeler. |
-| `/msg BilgehanBot status` | OPER, deneme modu ve kuyruk durumunu gösterir. |
-| `/msg BilgehanBot score 203.0.113.7` | Bu IP'nin zaman penceresi içindeki puanını gösterir. |
-| `/msg BilgehanBot score kullanici.example` | Bu tam hostun puanını gösterir. |
-| `/msg BilgehanBot reset 203.0.113.7` | IP'nin puan ve son ceza geçmişini temizler. |
+| `/msg BilgehanBot help` | Komutları listeler. |
+| `/msg BilgehanBot status` | OPER, sağlayıcı, deneme modu ve kuyruk durumu. |
+| `/msg BilgehanBot score 203.0.113.7` | Zaman penceresi içindeki toplam puan. |
+| `/msg BilgehanBot list 1` | En yüksek puanlı host/IP kayıtlarının ilk sayfası. Sayfa başına 10 kayıt. |
+| `/msg BilgehanBot query 203.0.113.7 1` | Bu host/IP için kayıtlı son ihlaller: UTC zaman, kategori ve puan. SQL metni çalıştırmaz. |
+| `/msg BilgehanBot reset 203.0.113.7` | Puanları temizler; ban kaldırmaz. |
+| `/msg BilgehanBot forgive 203.0.113.7` | Puanları temizler; botun kayıtlı aktif banları için kaldırma talebi gönderir. |
+| `/msg BilgehanBot settings` | Değiştirilebilir etkin kuralları ve ayarları gösterir; anahtar/şifre göstermez. |
+| `/msg BilgehanBot set dry_run true` | Deneme modunu açar. |
+| `/msg BilgehanBot set score_window_hours 48` | Puan penceresini 48 saat yapar. Daha önce temizlenmiş kayıtları geri getirmez. |
+| `/msg BilgehanBot set action_cooldown_seconds 7200` | Aynı/düşük basamak için cooldown 2 saat. |
+| `/msg BilgehanBot set max_message_age_seconds 45` | Mesaj yaş sınırını değiştirir. |
+| `/msg BilgehanBot set reason Kanal kurali ihlali` | Ban nedenini değiştirir. |
+| `/msg BilgehanBot set rule.harassment.threshold 0.90` | Mevcut OpenAI kuralının eşiğini değiştirir. |
+| `/msg BilgehanBot set rule.harassment.points 3` | Mevcut kuralın puanını değiştirir. Google örneği: `rule.Toxic.points`. |
+| `/msg BilgehanBot set penalty.10.duration 1h` | Mevcut 10 puanlık basamağın süresini değiştirir. |
+| `/msg BilgehanBot set penalty.10.command ZLINE` | Mevcut basamağın komutunu değiştirir. Gerçek IP gereksinimi devam eder. |
+| `/msg BilgehanBot unset dry_run` | SQLite'taki değişikliği siler; conf değerine döner. Diğer izinli ayar adları için de kullanılabilir. |
+| `/msg BilgehanBot except list 1` | Muafiyet listesinin ilk sayfası. |
+| `/msg BilgehanBot except add account guvenilirhesap` | Doğrulanmış hesabı muaf tutar. Nick değil hesap adı yaz. |
+| `/msg BilgehanBot except del account guvenilirhesap` | Master tarafından eklenmiş hesap muafiyetini kaldırır. |
+| `/msg BilgehanBot except add host 203.0.113.7` | Tam host/IP muafiyeti ekler. |
+| `/msg BilgehanBot except del host 203.0.113.7` | Master tarafından eklenmiş host muafiyetini kaldırır. |
 
-`score` ve `reset` komutlarına nick değil, tam host/IP yazılır. Bu bilgi ihlal logundaki `host=` alanında bulunur. `reset` sunucudaki mevcut banı kaldırmaz; bunun için IRC sunucusunun ban yönetimi kullanılmalı.
+`exception` komutu `except` ile aynı anlama gelir. Liste/sorgu sayfaları 1'den başlar. Hedef olarak nick yerine tam host/IP kullanılır; ihlal logundaki `host=` alanından bulunabilir. Boşluklu metinler yalnızca `reason` değerinde kullanılabilir.
 
-Puanlar **nick yerine tam host/IP üzerinden** tutulur. Nick değiştirince puan korunur. Host/IP değişirse yeni kayıt oluşur. Ortak host/IP kullanan birden fazla kişi aynı puan kaydından ve host/IP yasağından etkilenebilir.
+Ayarlar doğrulanır, uygulanır ve SQLite'a kaydedilir. **SQLite'taki master ayarları conf değerlerinin önüne geçer**; yeniden başlatmada korunur. Dosyanın değerine dönmek için `unset` kullan. Kategori değişiklikleri sağlayıcıya göre ayrı tutulur. Master hesabı listesi, anahtarlar, dosya yolları, bağlantı ayarları ve sağlayıcı IRC üzerinden değiştirilemez; conf dosyasından yönetilir.
+
+`forgive`, yalnızca botun veritabanında `pending/requested` olarak bildiği, henüz süresi dolmamış ban taleplerini hedefler. Diğer operatörlerin banlarını arayıp kaldırmaz. IRC sunucusundan uygulanma onayı sorgulanmadığı için cevap bir **kaldırma talebidir**. Bağlantı o sırada kesildiyse aynı `forgive` komutu tekrar gönderilebilir. Sunucu sonucu oper loglarından doğrulanmalı.
+
+Af, reset, ayar veya muafiyet değişikliğinden önce kuyruğa girmiş moderasyon sonuçları geçersiz sayılır; eski bir API yanıtı affedilen kullanıcıya tekrar puan yazmaz. Yönetim değişikliklerinin kim tarafından ve ne zaman yapıldığı SQLite'taki `admin_audit` tablosunda tutulur.
+
+Puanlar nick yerine **tam host/IP** üzerinden tutulur. Nick değiştirince puan korunur. Host/IP değişirse yeni kayıt oluşur. Ortak host/IP kullananlar aynı puan kaydından ve host/IP yasağından etkilenebilir.
 
 ### KLINE ve ZLINE farkı
 
@@ -346,7 +472,11 @@ SQLite, ayrı sunucu gerektirmeyen dosya tabanlı bir veritabanıdır. Bot ilk �
 | Tablo | Tutulan bilgi |
 |---|---|
 | `users` | Host/IP kimliği, son ceza talebinin zamanı ve puan basamağı |
-| `incidents` | İhlalin zamanı ve verilen puan |
+| `actions` | Botun ban/kaldırma talepleri, hedef maske, süre ve durum |
+| `settings` | Master tarafından değiştirilen kalıcı ayarlar |
+| `exceptions` | Master tarafından eklenen muafiyetler |
+| `admin_audit` | Yönetim değişikliklerinin zamanı, master hesabı ve hedefi |
+| `incidents` | İhlalin zamanı, kategorisi ve verilen puan |
 
 Mesaj metinleri veritabanına kaydedilmez. Puanlar bot kapatılıp açıldığında korunur. Veritabanı okunamazsa bot sessizce boş kayıtla başlamaz; hata vererek durur.
 
@@ -377,14 +507,16 @@ Bu örnek aynı isimli eski yedeğin üzerine yazar; farklı tarihler için fark
 | API `401` | API anahtarını ve projesini kontrol et; gerekirse yeni anahtar oluşturup dosyayı güncelle. |
 | API `403` | API anahtarının ve projenin ilgili uç noktaya erişim izinlerini kontrol et. |
 | API `429` | Platform'daki kullanım limitlerini, kota ve hesap durumunu kontrol et. |
-| Sahip komutlarına cevap yok | Listede nick yerine hesap adının yazdığını, o hesaba giriş yaptığını ve sunucunun `account-tag` desteklediğini kontrol et. |
+| Master kontrolü / `account-tag` hatası | Listede nick yerine hesap adının yazdığını, o hesaba giriş yaptığını ve sunucunun `account-tag` desteklediğini kontrol et. Bu yetenek yoksa bot moderasyon başlatmaz. |
+| Google dil destek hatası | API dili doğrulanmış olarak desteklemiyor. `allow_unsupported_language` varsayılanı sonucu atlar. Kaliteyi denemeden canlı yaptırım açma. |
+| Veritabanı başka bot tarafından kullanılıyor | Aynı `state_file` ile ikinci süreç başlatılmış olabilir. Mevcut süreci/servisi kontrol et. `.lock` dosyasının varlığı tek başına süreç çalışıyor demek değildir; dosyayı silerek kilidi aşmaya çalışma. |
 | Mesajlara puan yazılmıyor | Kanal listesini, API hatalarını ve eşikleri kontrol et. Sahip hesabı muaftır. Kuyruk dolan veya eskiyen mesajlar atlanır. |
 | `DRY-RUN` görünüyor | Deneme modu açıktır; beklenen davranıştır. Gerçek ban için `dry_run: false` gerekir. |
 | ZLINE atlanıyor | Mesaj önekinde gerçek IP görünmüyor olabilir. Gizli hosttan IP tahmini yapılmaz. |
 | Ban gönderilmiş görünüyor ama uygulanmıyor | Sunucunun KLINE/ZLINE desteğini, OPER izinlerini ve tam host eşleşmesini sunucu tarafında kontrol et. |
 | SQLite/dosya izin hatası | Botu çalıştıran kullanıcının `data` klasörüne yazabildiğini kontrol et. Servis kurulumunda kullanıcı `ircmod` olur. |
 
-API hatası veya zaman aşımında ilgili mesaja puan/ceza verilmez. Bu sürüm başarısız Moderation isteklerini otomatik olarak yeniden denemez ve hesap kotasına göre özel hız sınırlaması yapmaz. Kuyruk büyüklüğü bir API hız sınırı değildir.
+API hatası veya zaman aşımında ilgili mesaja puan/ceza verilmez. Ağ hataları, HTTP 429 ve 5xx sınırlı sayıda yeniden denenir. 429 yanıtındaki `Retry-After` dikkate alınır; bekleme en fazla 120 saniyeye sınırlandırılır ve mesajın yaş/deadline sınırı yine geçerlidir. `requests_per_minute` her isteği sınırlar; günlük/token kotası sağlayıcı panelinden takip edilmelidir. Kuyruk büyüklüğü bir API hız sınırı değildir.
 
 ## 10. Güncelleme ve geliştirici kontrolleri
 
@@ -407,16 +539,22 @@ go test -race ./...
 go vet ./...
 ```
 
-Testler OpenAI hesabına veya gerçek IRC ağına bağlanmaz; yerel test sunucularını kullanır. `-race` kontrolü için sistemde C derleyicisi gerekebilir; Ubuntu/Debian'da `sudo apt install build-essential` ile kurulabilir. Normal `CGO_ENABLED=0` bot derlemesi C derleyicisi gerektirmez.
+Testler gerçek OpenAI/Google hesabına veya gerçek IRC ağına bağlanmaz; yerel test sunucularını kullanır. `-race` kontrolü için sistemde C derleyicisi gerekebilir; Ubuntu/Debian'da `sudo apt install build-essential` ile kurulabilir. Normal `CGO_ENABLED=0` bot derlemesi C derleyicisi gerektirmez.
 
 IRC bağlantı/protokol işlemleri [girc](https://github.com/lrstanley/girc), SQLite erişimi [modernc.org/sqlite](https://modernc.org/sqlite) ile yapılır. Yeniden bağlanma beklemesi, OPER/JOIN akışı ve moderasyon kuralları bot tarafından yönetilir.
 
 ## Verilerin işlenmesi ve kaynaklar
 
-Denetlenen kanal mesajının metni OpenAI API'ye gönderilir; önceki sohbet geçmişi eklenmez. Mesaj içerikleri botun loguna veya SQLite'a yazılmaz. Host/IP, kategori ve puanlar loglarda; host/IP ile puan/ceza zamanları veritabanında bulunur. API anahtarı ve OPER şifresi bot tarafından loglanmaz.
+Denetlenen kanal mesajının metni seçilen OpenAI veya Google API'ye gönderilir; önceki sohbet geçmişi eklenmez. Mesaj içerikleri botun loguna veya SQLite'a yazılmaz. Host/IP, kategori ve puanlar loglarda; host/IP ile puan/ceza zamanları veritabanında bulunur. API anahtarı ve OPER şifresi bot tarafından loglanmaz.
 
 - [OpenAI API başlangıç rehberi](https://developers.openai.com/api/docs/quickstart)
 - [OpenAI API kimlik doğrulaması](https://developers.openai.com/api/reference/overview)
 - [OpenAI Moderation API](https://developers.openai.com/api/docs/guides/moderation)
 - [UnrealIRCd kullanıcı ve OPER komutları](https://www.unrealircd.org/docs/User_%26_Oper_commands)
 - [Go kurulumu](https://go.dev/doc/install)
+
+## Üretime geçişte doğrulanacaklar
+
+Derleme, yarış algılayıcılı testler, provider/HTTP hata senaryoları ve yerel IRC akışları otomatik kontrol edilir. Ayrıntılar [üretim kontrol raporunda](PRODUCTION_READINESS.md) bulunur.
+
+Kendi sunucunda OPER izinlerini, kanal girişini, `account-tag` desteğini ve KLINE/ZLINE kaldırma biçimini önce deneme ortamında doğrula. Provider anahtarlarının gerçek hesapta çalışması, Google dil davranışı ve bant/kota kapasitesi yerel testlerle kanıtlanamaz. Gerçek trafikle eşikler gözlenmeden yalnızca testlerin geçmesine dayanarak otomatik ban açma.

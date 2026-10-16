@@ -3,11 +3,13 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	_ "modernc.org/sqlite"
 )
 
@@ -16,8 +18,9 @@ type Record struct {
 	LastTier   int
 }
 type Store struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu   sync.Mutex
+	db   *sql.DB
+	lock *flock.Flock
 }
 
 func openStore(path string) (*Store, error) {
@@ -35,16 +38,32 @@ func openStore(path string) (*Store, error) {
 	if err = os.Chmod(path, 0600); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	lock := flock.New(abs + ".lock")
+	locked, err := lock.TryLock()
+	if err != nil || !locked {
+		return nil, fmt.Errorf("veritabanı başka bir bot tarafından kullanılıyor")
+	}
+	u := url.URL{Scheme: "file", Path: abs}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		lock.Unlock()
+		return nil, err
+	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, lock: lock}
 	ok := false
 	defer func() {
 		if !ok {
 			db.Close()
+			lock.Unlock()
 		}
 	}()
 	if _, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
@@ -54,11 +73,24 @@ func openStore(path string) (*Store, error) {
  CREATE INDEX IF NOT EXISTS incidents_expiry ON incidents(at);`); err != nil {
 		return nil, fmt.Errorf("SQLite başlatılamadı: %w", err)
 	}
+	if err = s.initAdminSchema(); err != nil {
+		return nil, err
+	}
 	ok = true
 	return s, nil
 }
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	e := s.db.Close()
+	u := s.lock.Unlock()
+	if e != nil {
+		return e
+	}
+	return u
+}
 func (s *Store) add(key string, points int, now time.Time, window time.Duration) (Record, int, error) {
+	return s.addWithCategory(key, points, "", now, window)
+}
+func (s *Store) addWithCategory(key string, points int, category string, now time.Time, window time.Duration) (Record, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var r Record
@@ -73,7 +105,7 @@ func (s *Store) add(key string, points int, now time.Time, window time.Duration)
 	if _, err = tx.Exec(`DELETE FROM incidents WHERE at<=?`, now.Add(-window).UnixNano()); err != nil {
 		return r, 0, err
 	}
-	if _, err = tx.Exec(`INSERT INTO incidents(identity,at,points) VALUES(?,?,?)`, key, now.UnixNano(), points); err != nil {
+	if _, err = tx.Exec(`INSERT INTO incidents(identity,at,points,category) VALUES(?,?,?,?)`, key, now.UnixNano(), points, category); err != nil {
 		return r, 0, err
 	}
 	var last int64

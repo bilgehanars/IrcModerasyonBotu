@@ -13,8 +13,15 @@ import (
 
 func main() {
 	path := flag.String("config", "bilgehan.conf", "JSON yapılandırma dosyası")
+	initConfig := flag.Bool("init", false, "Etkileşimli bilgehan.conf oluştur")
 	check := flag.Bool("check", false, "Yapılandırmayı doğrula ve çık")
 	flag.Parse()
+	if *initConfig {
+		if err := generateConfig(os.Stdin, os.Stdout, *path); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	c, err := loadConfig(*path)
 	if err != nil {
 		log.Fatalf("Yapılandırma yüklenemedi: %v", err)
@@ -28,6 +35,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
+	if _, err = newRuntime(c, store); err != nil {
+		log.Fatalf("Kalıcı ayar hatası: %v", err)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	mod := newModerator(c)

@@ -5,11 +5,16 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.26.x", "stable"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
-      - run: go test -race ./...
+          go-version: ${{ matrix.go }}
+      - run: go test -race -timeout 90s ./...
       - run: go vet ./...
-      - run: go build ./...
+      - run: CGO_ENABLED=0 go build -o ircmoderasyonbotu .
+      - run: ./ircmoderasyonbotu -config bilgehan.conf.example -check
+      - run: ./ircmoderasyonbotu -config bilgehan.google.conf.example -check

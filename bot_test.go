@@ -236,6 +236,7 @@ func TestIRCIntegration(t *testing.T) {
 			if read() != "JOIN #sohbet" {
 				t.Fatal("join")
 			}
+			write(":BilgehanBot!moderasyon@bot.host JOIN #sohbet")
 			write("PING :test")
 			if got, _ := parseMessage(read()); got.Command != "PONG" || got.Params[len(got.Params)-1] != "test" {
 				t.Fatal("pong")
@@ -253,6 +254,41 @@ func TestIRCIntegration(t *testing.T) {
 				conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 				if line, e := rd.ReadString('\n'); e == nil {
 					t.Fatalf("dry run sent %s", line)
+				}
+			}
+			if !dry {
+				write(":bilgehan!fake@evil.host PRIVMSG BilgehanBot :reset 203.0.113.1")
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :score 203.0.113.1")
+				if got := read(); !strings.Contains(got, "puan=2") {
+					t.Fatal("unauthorized reset", got)
+				}
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :query 203.0.113.1")
+				if got := read(); !strings.Contains(got, "kategori=harassment") {
+					t.Fatal("history", got)
+				}
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :except add account protected")
+				if got := read(); !strings.Contains(got, "güncellendi") {
+					t.Fatal("exception", got)
+				}
+				write("@account=protected :victim!x@203.0.113.1 PRIVMSG #sohbet :test message")
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :score 203.0.113.1")
+				if got := read(); !strings.Contains(got, "puan=2") {
+					t.Fatal("exception not applied", got)
+				}
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :set dry_run true")
+				if got := read(); !strings.Contains(got, "kaydedildi") {
+					t.Fatal("setting", got)
+				}
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :forgive 203.0.113.1")
+				if got := read(); got != "KLINE -*@203.0.113.1" {
+					t.Fatal("unban", got)
+				}
+				if got := read(); !strings.Contains(got, "Puanlar temizlendi") {
+					t.Fatal("forgive reply", got)
+				}
+				write("@account=bilgehan :owner!x@safe.host PRIVMSG BilgehanBot :score 203.0.113.1")
+				if got := read(); !strings.Contains(got, "puan=0") {
+					t.Fatal("forgive score", got)
 				}
 			}
 			cancel()

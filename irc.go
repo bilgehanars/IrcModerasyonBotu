@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lrstanley/girc"
@@ -39,6 +40,15 @@ func parseMessage(line string) (Message, error) {
 	return fromEvent(*e), nil
 }
 func fold(v string) string { return girc.ToRFC1459(v) }
+func accountID(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
+}
 func sender(prefix string) (nick, user, host string) {
 	i := strings.IndexByte(prefix, '!')
 	j := strings.LastIndexByte(prefix, '@')
@@ -50,6 +60,8 @@ func sender(prefix string) (nick, user, host string) {
 
 type Job struct {
 	Nick, Host, Key, Text string
+	Account               string
+	Revision              uint64
 	At                    time.Time
 }
 type Session struct {
@@ -62,6 +74,13 @@ type Session struct {
 	queue                    chan Job
 	nick                     string
 	accountTag, oper, joined bool
+	runtime                  *Runtime
+	actionMu                 sync.Mutex
+	ready                    atomic.Bool
+	out                      chan string
+	joinedChannels           map[string]bool
+	handshakeDone            chan struct{}
+	handshakeOnce            sync.Once
 }
 
 func (s *Session) send(line string) error {
@@ -74,11 +93,20 @@ func (s *Session) send(line string) error {
 	if !s.client.IsConnected() {
 		return girc.ErrNotConnected
 	}
-	return s.client.Cmd.SendRaw(line)
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case s.out <- line:
+		return nil
+	default:
+		return fmt.Errorf("IRC gönderim kuyruğu dolu")
+	}
+
 }
 func (s *Session) notice(nick, text string) {
 	if atom(nick) {
-		if e := s.send("NOTICE " + nick + " :" + text); e != nil {
+		text = strings.NewReplacer("\r", " ", "\n", " ", "\x00", "").Replace(text)
+		if e := s.send("NOTICE " + nick + " :" + clip(text, 350)); e != nil {
 			log.Print("NOTICE gönderilemedi")
 		}
 	}
@@ -92,48 +120,11 @@ func (s *Session) owner(m Message) bool {
 		return false
 	}
 	for _, v := range s.c.IRC.OwnerAccounts {
-		if fold(v) == fold(a) {
+		if accountID(v) == accountID(a) {
 			return true
 		}
 	}
 	return false
-}
-func (s *Session) command(m Message) {
-	nick, _, _ := sender(m.Prefix)
-	if nick == "" || !s.owner(m) {
-		return
-	}
-	parts := strings.Fields(m.Params[1])
-	if len(parts) == 0 {
-		return
-	}
-	window := time.Duration(s.c.Moderation.ScoreWindowHours) * time.Hour
-	switch strings.ToLower(parts[0]) {
-	case "help":
-		s.notice(nick, "Komutlar: status | score <tam-host/IP> | reset <tam-host/IP> | help")
-	case "status":
-		s.notice(nick, fmt.Sprintf("OPER=%t dry_run=%t kuyruk=%d/%d", s.oper, s.c.Moderation.DryRun, len(s.queue), cap(s.queue)))
-	case "score", "reset":
-		if len(parts) != 2 || !validHost(parts[1]) {
-			s.notice(nick, "Tam host/IP belirt: score <host> veya reset <host>")
-			return
-		}
-		key := hostKey(parts[1])
-		if strings.ToLower(parts[0]) == "score" {
-			total, err := s.store.score(key, window)
-			if err != nil {
-				s.notice(nick, "SQLite puanı okunamadı")
-				return
-			}
-			s.notice(nick, fmt.Sprintf("Puan: %d", total))
-			return
-		}
-		if err := s.store.reset(key); err != nil {
-			s.notice(nick, "Puan dosyası yazılamadı")
-			return
-		}
-		s.notice(nick, "Puan ve ceza geçmişi sıfırlandı. Sunucudaki mevcut ban kaldırılmadı.")
-	}
 }
 func validHost(host string) bool {
 	if net.ParseIP(host) != nil {
@@ -181,6 +172,9 @@ func banLine(p Penalty, host, reason string) (string, error) {
 func (s *Session) handle(m Message) error {
 	switch m.Command {
 	case "001":
+		if !s.accountTag {
+			return fmt.Errorf("güvenli master kontrolü için account-tag gerekli")
+		}
 		if len(m.Params) > 0 {
 			s.nick = m.Params[0]
 		}
@@ -188,6 +182,7 @@ func (s *Session) handle(m Message) error {
 		return s.send("OPER " + s.c.IRC.OperName + " " + s.c.IRC.OperPassword)
 	case "381":
 		s.oper = true
+		s.ready.Store(true)
 		if !s.joined {
 			for _, ch := range s.c.IRC.Channels {
 				if e := s.send("JOIN " + ch); e != nil {
@@ -197,10 +192,24 @@ func (s *Session) handle(m Message) error {
 			s.joined = true
 			log.Print("OPER başarılı; kanallara katılım istendi")
 		}
+	case "471", "473", "474", "475", "477":
+		return fmt.Errorf("kanala giriş reddedildi: %s", m.Command)
+	case "JOIN":
+		nick, _, _ := sender(m.Prefix)
+		if fold(nick) == fold(s.nick) && len(m.Params) > 0 {
+			s.joinedChannels[fold(m.Params[0])] = true
+			all := true
+			for _, ch := range s.c.IRC.Channels {
+				all = all && s.joinedChannels[fold(ch)]
+			}
+			if all {
+				s.handshakeOnce.Do(func() { close(s.handshakeDone) })
+			}
+		}
 	case "464", "491", "481":
 		return fmt.Errorf("IRC yetkilendirme hatası %s", m.Command)
 	case "421":
-		log.Print("Sunucu desteklenmeyen komut hatası (421) bildirdi")
+		return fmt.Errorf("sunucu bir bot komutunu desteklemiyor (421)")
 	case "MODE":
 		if len(m.Params) >= 2 && fold(m.Params[0]) == fold(s.nick) {
 			adding := true
@@ -212,6 +221,7 @@ func (s *Session) handle(m Message) error {
 					adding = false
 				case 'o':
 					if !adding {
+						s.ready.Store(false)
 						return fmt.Errorf("OPER yetkisi kaldırıldı")
 					}
 				}
@@ -238,7 +248,7 @@ func (s *Session) handle(m Message) error {
 			s.command(m)
 			return nil
 		}
-		if !s.oper || !s.joined || s.owner(m) {
+		if !s.oper || !s.joined || !s.joinedChannels[fold(m.Params[0])] || s.owner(m) {
 			return nil
 		}
 		watched := false
@@ -254,6 +264,13 @@ func (s *Session) handle(m Message) error {
 		if nick == "" || user == "" || !validHost(host) || fold(nick) == fold(s.nick) {
 			return nil
 		}
+		account := m.Tags["account"]
+		if !s.accountTag {
+			account = ""
+		}
+		if s.runtime.exempt(account, host) {
+			return nil
+		}
 		text := m.Params[1]
 		if strings.HasPrefix(text, "\x01ACTION ") && strings.HasSuffix(text, "\x01") {
 			text = strings.TrimSuffix(strings.TrimPrefix(text, "\x01ACTION "), "\x01")
@@ -264,7 +281,7 @@ func (s *Session) handle(m Message) error {
 			return nil
 		}
 		select {
-		case s.queue <- Job{nick, host, hostKey(host), text, time.Now()}:
+		case s.queue <- Job{Nick: nick, Host: host, Key: hostKey(host), Text: text, At: time.Now(), Account: account, Revision: s.runtime.revision.Load()}:
 		default:
 			log.Print("Moderation kuyruğu dolu; mesaj atlandı")
 		}
@@ -277,54 +294,91 @@ func (s *Session) worker() {
 		case <-s.ctx.Done():
 			return
 		case j := <-s.queue:
-			if time.Since(j.At) > time.Duration(s.c.Moderation.MaxMessageAgeSeconds)*time.Second {
+			c := s.runtime.snapshot()
+			deadline := j.At.Add(time.Duration(c.Moderation.MaxMessageAgeSeconds) * time.Second)
+			if time.Now().After(deadline) || j.Revision != s.runtime.revision.Load() || s.runtime.exempt(j.Account, j.Host) {
 				continue
 			}
-			scores, err := s.moderator.Check(s.ctx, j.Text)
-			if err != nil {
+			ctx, cancel := context.WithDeadline(s.ctx, deadline)
+			scores, e := s.moderator.Check(ctx, j.Text)
+			cancel()
+			if e != nil {
 				if s.ctx.Err() == nil {
-					log.Printf("Kontrol atlandı: %v", err)
+					log.Printf("Kontrol atlandı: %v", e)
 				}
 				continue
 			}
-			if s.ctx.Err() != nil || time.Since(j.At) > time.Duration(s.c.Moderation.MaxMessageAgeSeconds)*time.Second {
-				continue
-			}
-			points, category := scoreMessage(s.c.Moderation.Rules, scores)
-			if points == 0 {
-				continue
-			}
-			now := time.Now()
-			r, total, err := s.store.add(j.Key, points, now, time.Duration(s.c.Moderation.ScoreWindowHours)*time.Hour)
-			if err != nil {
-				log.Print("Puan kaydı başarısız; ceza uygulanmadı")
-				continue
-			}
-			log.Printf("İhlal host=%s kategori=%s ek=%d toplam=%d", j.Host, category, points, total)
-			p := penaltyFor(s.c.Moderation.Penalties, total, r, now, time.Duration(s.c.Moderation.ActionCooldownSeconds)*time.Second)
-			if p == nil {
-				continue
-			}
-			line, err := banLine(*p, j.Host, s.c.Moderation.Reason)
-			if err != nil {
-				log.Printf("Ceza atlandı: %v", err)
-				continue
-			}
-			if s.c.Moderation.DryRun {
-				log.Printf("DRY-RUN %s", line)
-			} else {
-				if err = s.send(line); err != nil {
-					continue
-				}
-				log.Printf("Ceza talebi sunucuya gönderildi: %s", line)
-			}
-			if err = s.store.mark(j.Key, p.Points, now); err != nil {
-				log.Print("Ceza geçmişi kaydedilemedi")
-			}
+			s.enforce(j, scores, deadline)
 		}
 	}
 }
+func (s *Session) enforce(j Job, scores map[string]float64, deadline time.Time) {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	if s.ctx.Err() != nil || !s.ready.Load() || time.Now().After(deadline) || j.Revision != s.runtime.revision.Load() || s.runtime.exempt(j.Account, j.Host) {
+		return
+	}
+	c := s.runtime.snapshot()
+	points, category := scoreMessage(c.Moderation.Rules, scores)
+	if points == 0 {
+		return
+	}
+	now := time.Now()
+	r, total, e := s.store.addIncident(j.Key, points, category, now, time.Duration(c.Moderation.ScoreWindowHours)*time.Hour)
+	if e != nil {
+		log.Print("SQLite puan kaydı başarısız; ceza uygulanmadı")
+		return
+	}
+	log.Printf("İhlal host=%s kategori=%s ek=%d toplam=%d", j.Host, category, points, total)
+	p := penaltyFor(c.Moderation.Penalties, total, r, now, time.Duration(c.Moderation.ActionCooldownSeconds)*time.Second)
+	if p == nil {
+		return
+	}
+	line, e := banLine(*p, j.Host, c.Moderation.Reason)
+	if e != nil {
+		log.Printf("Ceza atlandı: %v", e)
+		return
+	}
+	if c.Moderation.DryRun {
+		log.Printf("DRY-RUN %s", line)
+		return
+	}
+	active, e := s.store.activeActions(j.Key)
+	if e != nil {
+		log.Print("Ban geçmişi okunamadı; ceza atlandı")
+		return
+	}
+	for _, a := range active {
+		if a.Tier >= p.Points {
+			return
+		}
+	}
+	id, e := s.store.beginAction(j.Key, j.Host, *p, now)
+	if e != nil {
+		log.Print("Ban talebi kaydedilemedi; ceza atlandı")
+		return
+	}
+	if e = s.send(line); e != nil {
+		s.store.actionStatus(id, "failed")
+		log.Print("Ban talebi kuyruğa alınamadı")
+		return
+	}
+	if e = s.store.actionStatus(id, "requested"); e != nil {
+		log.Print("Ban talebi durumu kaydedilemedi")
+	}
+	if e = s.store.mark(j.Key, p.Points, now); e != nil {
+		log.Print("Ceza geçmişi kaydedilemedi")
+	}
+	log.Printf("Ceza talebi IRC gönderim kuyruğuna alındı: %s", line)
+}
 func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
+	runtime, err := newRuntime(c, store)
+	if err != nil {
+		return fmt.Errorf("kalıcı ayarlar yüklenemedi: %w", err)
+	}
 	host, portText, err := net.SplitHostPort(c.IRC.Server)
 	if err != nil {
 		return err
@@ -338,15 +392,18 @@ func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) err
 		HandleNickCollide: func(string) string { return "" },
 	})
 	sessionCtx, cancel := context.WithCancel(ctx)
-	s := &Session{c: c, client: client, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick}
+	s := &Session{c: c, client: client, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick, runtime: runtime, out: make(chan string, 128), joinedChannels: map[string]bool{}, handshakeDone: make(chan struct{})}
 	var wg sync.WaitGroup
-	defer func() { cancel(); client.Close(); wg.Wait() }()
+	initialized := make(chan struct{})
+	connectDone := make(chan struct{})
+	defer func() { cancel(); close(connectDone); wg.Wait() }()
 	client.Handlers.Add(girc.INITIALIZED, func(cl *girc.Client, _ girc.Event) {
+		close(initialized)
 		if sessionCtx.Err() != nil {
 			cl.Close()
 		}
 	})
-	for _, command := range []string{"001", "381", "464", "491", "481", "421", "MODE", "433", "ERROR", "KICK", "NICK", "PRIVMSG"} {
+	for _, command := range []string{"JOIN", "471", "473", "474", "475", "477", "001", "381", "464", "491", "481", "421", "MODE", "433", "ERROR", "KICK", "NICK", "PRIVMSG"} {
 		client.Handlers.Add(command, func(cl *girc.Client, event girc.Event) {
 			if sessionCtx.Err() != nil {
 				return
@@ -360,7 +417,52 @@ func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) err
 		})
 	}
 	wg.Add(1)
-	go func() { defer wg.Done(); <-sessionCtx.Done(); client.Close() }()
+	go func() {
+		defer wg.Done()
+		<-sessionCtx.Done()
+		select {
+		case <-initialized:
+			client.Close()
+		case <-connectDone:
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-initialized:
+		case <-sessionCtx.Done():
+			return
+		}
+		for {
+			select {
+			case <-sessionCtx.Done():
+				return
+			case line := <-s.out:
+				if sessionCtx.Err() != nil {
+					return
+				}
+				if e := client.Cmd.SendRaw(line); e != nil {
+					log.Print("IRC gönderimi başarısız")
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		timer := time.NewTimer(45 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-sessionCtx.Done():
+		case <-s.handshakeDone:
+		case <-timer.C:
+			log.Print("IRC kayıt/OPER/JOIN zaman aşımı")
+			cancel()
+		}
+	}()
 	wg.Add(1)
 	go func() { defer wg.Done(); s.worker() }()
 	if err = client.Connect(); err != nil {
