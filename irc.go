@@ -1,16 +1,18 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lrstanley/girc"
 )
 
 type Message struct {
@@ -19,78 +21,24 @@ type Message struct {
 	Params          []string
 }
 
+func fromEvent(e girc.Event) Message {
+	m := Message{Command: e.Command, Params: e.Params, Tags: map[string]string{}}
+	if e.Source != nil {
+		m.Prefix = e.Source.String()
+	}
+	for key := range e.Tags {
+		m.Tags[key], _ = e.Tags.Get(key)
+	}
+	return m
+}
 func parseMessage(line string) (Message, error) {
-	m := Message{Tags: map[string]string{}}
-	if strings.HasPrefix(line, "@") {
-		i := strings.IndexByte(line, ' ')
-		if i < 0 {
-			return m, fmt.Errorf("tags")
-		}
-		for _, tag := range strings.Split(line[1:i], ";") {
-			kv := strings.SplitN(tag, "=", 2)
-			if len(kv) == 2 {
-				m.Tags[kv[0]] = unescapeTag(kv[1])
-			}
-		}
-		line = strings.TrimLeft(line[i+1:], " ")
+	e := girc.ParseEvent(line)
+	if e == nil {
+		return Message{}, fmt.Errorf("geçersiz IRC mesajı")
 	}
-	if strings.HasPrefix(line, ":") {
-		i := strings.IndexByte(line, ' ')
-		if i < 0 {
-			return m, fmt.Errorf("prefix")
-		}
-		m.Prefix = line[1:i]
-		line = strings.TrimLeft(line[i+1:], " ")
-	}
-	for line != "" {
-		if line[0] == ':' {
-			m.Params = append(m.Params, line[1:])
-			break
-		}
-		i := strings.IndexByte(line, ' ')
-		if i < 0 {
-			m.Params = append(m.Params, line)
-			break
-		}
-		m.Params = append(m.Params, line[:i])
-		line = strings.TrimLeft(line[i+1:], " ")
-	}
-	if len(m.Params) == 0 {
-		return m, fmt.Errorf("empty")
-	}
-	m.Command = strings.ToUpper(m.Params[0])
-	m.Params = m.Params[1:]
-	return m, nil
+	return fromEvent(*e), nil
 }
-func unescapeTag(v string) string {
-	var b strings.Builder
-	for i := 0; i < len(v); i++ {
-		if v[i] != '\\' {
-			b.WriteByte(v[i])
-			continue
-		}
-		i++
-		if i == len(v) {
-			break
-		}
-		switch v[i] {
-		case ':':
-			b.WriteByte(';')
-		case 's':
-			b.WriteByte(' ')
-		case 'r':
-			b.WriteByte('\r')
-		case 'n':
-			b.WriteByte('\n')
-		default:
-			b.WriteByte(v[i])
-		}
-	}
-	return b.String()
-}
-func fold(v string) string {
-	return strings.NewReplacer("[", "{", "]", "}", "\\", "|", "^", "~").Replace(strings.ToLower(v))
-}
+func fold(v string) string { return girc.ToRFC1459(v) }
 func sender(prefix string) (nick, user, host string) {
 	i := strings.IndexByte(prefix, '!')
 	j := strings.LastIndexByte(prefix, '@')
@@ -105,34 +53,28 @@ type Job struct {
 	At                    time.Time
 }
 type Session struct {
-	c                                  Config
-	conn                               net.Conn
-	writeMu                            sync.Mutex
-	store                              *Store
-	moderator                          *Moderator
-	ctx                                context.Context
-	cancel                             context.CancelFunc
-	queue                              chan Job
-	nick                               string
-	accountTag, capEnded, oper, joined bool
+	c                        Config
+	client                   *girc.Client
+	store                    *Store
+	moderator                *Moderator
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	queue                    chan Job
+	nick                     string
+	accountTag, oper, joined bool
 }
 
 func (s *Session) send(line string) error {
 	if !safeText(line) || len(line) > 510 {
 		return fmt.Errorf("IRC satırı geçersiz veya çok uzun")
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
-	_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_, err := fmt.Fprintf(s.conn, "%s\r\n", line)
-	if err != nil {
-		s.cancel()
-		s.conn.Close()
+	if !s.client.IsConnected() {
+		return girc.ErrNotConnected
 	}
-	return err
+	return s.client.Cmd.SendRaw(line)
 }
 func (s *Session) notice(nick, text string) {
 	if atom(nick) {
@@ -178,7 +120,12 @@ func (s *Session) command(m Message) {
 		}
 		key := hostKey(parts[1])
 		if strings.ToLower(parts[0]) == "score" {
-			s.notice(nick, fmt.Sprintf("Puan: %d", s.store.score(key, window)))
+			total, err := s.store.score(key, window)
+			if err != nil {
+				s.notice(nick, "SQLite puanı okunamadı")
+				return
+			}
+			s.notice(nick, fmt.Sprintf("Puan: %d", total))
 			return
 		}
 		if err := s.store.reset(key); err != nil {
@@ -233,48 +180,6 @@ func banLine(p Penalty, host, reason string) (string, error) {
 }
 func (s *Session) handle(m Message) error {
 	switch m.Command {
-	case "PING":
-		if len(m.Params) > 0 {
-			return s.send("PONG :" + m.Params[len(m.Params)-1])
-		}
-	case "CAP":
-		if len(m.Params) < 3 {
-			return nil
-		}
-		sub := strings.ToUpper(m.Params[1])
-		caps := strings.Fields(m.Params[len(m.Params)-1])
-		switch sub {
-		case "LS":
-			for _, v := range caps {
-				if v == "account-tag" {
-					s.accountTag = true
-				}
-			}
-			if len(m.Params) == 4 && m.Params[2] == "*" {
-				return nil
-			}
-			if s.accountTag {
-				s.accountTag = false
-				return s.send("CAP REQ :account-tag")
-			}
-			return s.endCAP()
-		case "ACK":
-			for _, v := range caps {
-				if v == "account-tag" {
-					s.accountTag = true
-				}
-			}
-			return s.endCAP()
-		case "NAK":
-			s.accountTag = false
-			return s.endCAP()
-		case "DEL":
-			for _, v := range caps {
-				if v == "account-tag" {
-					s.accountTag = false
-				}
-			}
-		}
 	case "001":
 		if len(m.Params) > 0 {
 			s.nick = m.Params[0]
@@ -295,9 +200,6 @@ func (s *Session) handle(m Message) error {
 	case "464", "491", "481":
 		return fmt.Errorf("IRC yetkilendirme hatası %s", m.Command)
 	case "421":
-		if len(m.Params) > 1 && strings.EqualFold(m.Params[1], "CAP") {
-			return s.endCAP()
-		}
 		log.Print("Sunucu desteklenmeyen komut hatası (421) bildirdi")
 	case "MODE":
 		if len(m.Params) >= 2 && fold(m.Params[0]) == fold(s.nick) {
@@ -369,13 +271,6 @@ func (s *Session) handle(m Message) error {
 	}
 	return nil
 }
-func (s *Session) endCAP() error {
-	if s.capEnded {
-		return nil
-	}
-	s.capEnded = true
-	return s.send("CAP END")
-}
 func (s *Session) worker() {
 	for {
 		select {
@@ -430,75 +325,46 @@ func (s *Session) worker() {
 	}
 }
 func runSession(ctx context.Context, c Config, store *Store, mod *Moderator) error {
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	var conn net.Conn
-	var err error
-	if c.IRC.TLS {
-		td := tls.Dialer{NetDialer: dialer, Config: &tls.Config{MinVersion: tls.VersionTLS12}}
-		conn, err = td.DialContext(ctx, "tcp", c.IRC.Server)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", c.IRC.Server)
-	}
+	host, portText, err := net.SplitHostPort(c.IRC.Server)
 	if err != nil {
-		return fmt.Errorf("IRC bağlantısı kurulamadı: %w", err)
+		return err
 	}
+	port, _ := strconv.Atoi(portText)
+	client := girc.New(girc.Config{
+		Server: host, Port: port, Nick: c.IRC.Nick, User: c.IRC.User, Name: c.IRC.RealName, ServerPass: c.IRC.ServerPassword,
+		SSL: c.IRC.TLS, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host},
+		DisableSTS: true, DisableSTSFallback: true, DisableAutoWHOOnJoin: true, DisableAutoMODEOnJoin: true,
+		Debug: io.Discard, PingDelay: 60 * time.Second, PingTimeout: 90 * time.Second,
+		HandleNickCollide: func(string) string { return "" },
+	})
 	sessionCtx, cancel := context.WithCancel(ctx)
-	s := &Session{c: c, conn: conn, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick}
+	s := &Session{c: c, client: client, store: store, moderator: mod, ctx: sessionCtx, cancel: cancel, queue: make(chan Job, c.Moderation.QueueSize), nick: c.IRC.Nick}
 	var wg sync.WaitGroup
-	defer func() { cancel(); conn.Close(); wg.Wait() }()
+	defer func() { cancel(); client.Close(); wg.Wait() }()
+	client.Handlers.Add(girc.INITIALIZED, func(cl *girc.Client, _ girc.Event) {
+		if sessionCtx.Err() != nil {
+			cl.Close()
+		}
+	})
+	for _, command := range []string{"001", "381", "464", "491", "481", "421", "MODE", "433", "ERROR", "KICK", "NICK", "PRIVMSG"} {
+		client.Handlers.Add(command, func(cl *girc.Client, event girc.Event) {
+			if sessionCtx.Err() != nil {
+				return
+			}
+			s.accountTag = cl.HasCapability("account-tag")
+			if err := s.handle(fromEvent(event)); err != nil {
+				log.Printf("IRC oturumu durduruldu: %v", err)
+				cancel()
+				cl.Close()
+			}
+		})
+	}
 	wg.Add(1)
-	go func() { defer wg.Done(); <-sessionCtx.Done(); conn.Close() }()
-	for _, line := range []string{"CAP LS 302"} {
-		if err = s.send(line); err != nil {
-			return err
-		}
-	}
-	if c.IRC.ServerPassword != "" {
-		if err = s.send("PASS :" + c.IRC.ServerPassword); err != nil {
-			return err
-		}
-	}
-	if err = s.send("NICK " + c.IRC.Nick); err != nil {
-		return err
-	}
-	if err = s.send("USER " + c.IRC.User + " 0 * :" + c.IRC.RealName); err != nil {
-		return err
-	}
+	go func() { defer wg.Done(); <-sessionCtx.Done(); client.Close() }()
 	wg.Add(1)
 	go func() { defer wg.Done(); s.worker() }()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-sessionCtx.Done():
-				return
-			case <-t.C:
-				if e := s.send("PING :bilgehan"); e != nil {
-					return
-				}
-			}
-		}
-	}()
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 4096), 16384)
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Second))
-		if !scanner.Scan() {
-			break
-		}
-		m, e := parseMessage(strings.TrimSuffix(scanner.Text(), "\r"))
-		if e != nil {
-			continue
-		}
-		if e = s.handle(m); e != nil {
-			return e
-		}
+	if err = client.Connect(); err != nil {
+		return fmt.Errorf("IRC bağlantısı kesildi veya kurulamadı")
 	}
-	if err = scanner.Err(); err != nil {
-		return fmt.Errorf("IRC okuma kesildi: %w", err)
-	}
-	return fmt.Errorf("IRC bağlantısı kapandı")
+	return fmt.Errorf("IRC oturumu kapandı")
 }

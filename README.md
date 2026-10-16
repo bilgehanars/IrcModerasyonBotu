@@ -1,10 +1,10 @@
 # IrcModerasyonBotu
 
-Go ile yazılmış IRC moderasyon botu. OpenAI Moderation API kullanır; harici Go paketi gerektirmez. IRC sunucusuna normal istemci olarak bağlanır, OPER girişi yapar, yapılandırılmış kanallardaki mesajları denetler. Özel mesajlar yalnızca sahip komutları için kullanılır.
+Go ile yazılmış IRC moderasyon botu. OpenAI Moderation API kullanır; IRC istemcisi için `github.com/lrstanley/girc`, SQLite için CGo gerektirmeyen `modernc.org/sqlite` kullanır. IRC sunucusuna normal istemci olarak bağlanır, OPER girişi yapar, yapılandırılmış kanallardaki mesajları denetler. Özel mesajlar yalnızca sahip komutları için kullanılır.
 
 ## Kurulum
 
-Go 1.23 veya üzeri gerekir. Linux sunucuda:
+Go 1.26 veya üzeri gerekir. Linux sunucuda:
 
 ```sh
 git clone https://github.com/bilgehanars/IrcModerasyonBotu.git
@@ -17,7 +17,7 @@ go build -o ircmoderasyonbotu .
 ./ircmoderasyonbotu -config bilgehan.conf
 ```
 
-`bilgehan.conf` JSON biçimindedir; yorum satırı kabul etmez. Tüm bağlantı bilgileri ve kurallar bu dosyadan okunur. Dosya değiştiğinde botu yeniden başlat. Gerçek yapılandırma ve puan dosyası Git tarafından yok sayılır.
+`bilgehan.conf` JSON biçimindedir; yorum satırı kabul etmez. Tüm bağlantı bilgileri ve kurallar bu dosyadan okunur. Dosya değiştiğinde botu yeniden başlat. Gerçek yapılandırma ve veri dizini Git tarafından yok sayılır.
 
 Örnek ayarda `dry_run: true` olduğu için OPER girişi ve API kontrolleri çalışır, ceza komutları yalnızca loga yazılır. Otomatik yaptırımları etkinleştirmek için `dry_run` değerini `false` yap. Deneme modunda da puan ve ceza simülasyon geçmişi tutulur; canlı kullanıma geçerken gerektiğinde `reset` komutuyla temizle.
 
@@ -31,8 +31,14 @@ go build -o ircmoderasyonbotu .
 - Toplam puana uyan en yüksek ceza seçilir. Örnekte 10 puan → 30 dakika, 20 puan → 24 saat, 35 puan → süresiz KLINE.
 - `duration: "0"` süresiz demektir; `30m`, `24h`, `168h` süreli cezalardır. Gün için `24h` kullan; `1d` Go süre biçimi değildir.
 - Aynı veya daha düşük ceza basamağı cooldown dolmadan tekrar gönderilmez. Daha yüksek basamak beklemeden uygulanabilir. Cooldown ban süresinden bağımsızdır.
-- Puanlar ve son ceza talebi `state_file` dosyasına atomik olarak yazılır; bot yeniden başladığında yüklenir. Bozuk dosyada bot durur, puanları sessizce sıfırlamaz.
+- Puanlar ve son ceza talebi `state_file` ile belirtilen SQLite veritabanına (`data/scores.db`) yazılır. İhlal ekleme, süre dolan kayıtları temizleme ve toplam puan hesabı aynı SQL transaction içinde yapılır; WAL ve busy timeout kullanılır. Bot yeniden başladığında kayıtlar korunur. Bozuk veritabanında bot durur, puanları sessizce sıfırlamaz.
 - API hatası, zaman aşımı, dolu kuyruk veya çok eski mesaj için puan/ceza verilmez. Kuyruk dolması loglanır. API'ye her seferinde tek mesaj gönderilir, sohbet geçmişi gönderilmez.
+
+## SQLite
+
+`state_file: "data/scores.db"` kullanılır. Veritabanı ve tablolar ilk açılışta otomatik oluşturulur. `users` tablosu host/IP ve son ceza basamağını; `incidents` tablosu ihlal zamanı ve puanını tutar. `reset`, kullanıcının ihlallerini de foreign key ile siler.
+
+Çalışan SQLite veritabanının `-wal` ve `-shm` yan dosyaları olabilir. Yedek için botu durdurup `.db` dosyasını kopyala veya SQLite backup arayüzünü kullan. Çalışırken yalnızca `.db` dosyasını kopyalamak son işlemleri içermeyebilir.
 
 ## IRC sunucusu ve yetkiler
 
@@ -50,7 +56,7 @@ KLINE ve ZLINE **yerel sunucu** yaptırımlarıdır; bağlı IRC ağının tamam
 
 Botun OPER hesabına gerekli KLINE/ZLINE yetkilerini sunucuda tanımla. Bot `381` OPER başarı yanıtını almadan kanallara girmez. Başarısız OPER girişinde bağlantıyı yeniler. KLINE/ZLINE gönderimi logda **talep** olarak kaydedilir; sunucunun komutu uyguladığını doğrulayan bir ban listesi sorgusu yapılmaz. Sunucunun oper loglarını kontrol et.
 
-TLS varsayılan olarak açık, sertifika doğrulaması zorunludur. Bağlantı kesilirse artan bekleme ve küçük rastgele gecikme ile yeniden bağlanır; OPER ve JOIN tekrar yapılır. PING/PONG ve okuma zaman aşımı takılı bağlantıları kapatır. Önceki bağlantının kuyruğu yeni bağlantıda kullanılmaz. Kanaldan KICK edilirse yeniden bağlanır.
+IRC protokolü, CAP/IRCv3 görüşmesi, mesaj ayrıştırma, TLS bağlantısı ve PING/PONG `girc` tarafından yönetilir. Yeniden bağlanmada artan bekleme ve her oturumda OPER/JOIN uygulama katmanında yönetilir. TLS varsayılan olarak açık, sertifika doğrulaması zorunludur. Bağlantı kesilirse artan bekleme ve küçük rastgele gecikme ile yeniden bağlanır; OPER ve JOIN tekrar yapılır. PING/PONG ve okuma zaman aşımı takılı bağlantıları kapatır. Önceki bağlantının kuyruğu yeni bağlantıda kullanılmaz. Kanaldan KICK edilirse yeniden bağlanır.
 
 ## Sahip kontrolü
 
@@ -82,7 +88,7 @@ sudo systemctl enable --now ircmoderasyonbotu
 sudo journalctl -u ircmoderasyonbotu -f
 ```
 
-Mesaj içerikleri loga veya puan dosyasına yazılmaz. Denetlenen kanal mesajlarının metni OpenAI API'ye iletilir. Host/IP, kategori ve puanlar logda; host/IP, puan zamanları ve son ceza bilgisi veri dosyasında bulunur. API anahtarı ve OPER şifresi loglanmaz.
+Mesaj içerikleri loga veya SQLite veritabanına yazılmaz. Denetlenen kanal mesajlarının metni OpenAI API'ye iletilir. Host/IP, kategori ve puanlar logda; host/IP, puan zamanları ve son ceza bilgisi SQLite tablolarında bulunur. API anahtarı ve OPER şifresi loglanmaz.
 
 ## Doğrulama
 
@@ -91,6 +97,8 @@ go test -race ./...
 go vet ./...
 ```
 
-Testler gerçek bir IRC ağına veya OpenAI hesabına bağlanmaz; yerel TCP/HTTP sunucularıyla kayıt, CAP, OPER, PING/PONG, API, dry-run ve ceza gönderimini kontrol eder.
+Testler gerçek bir IRC ağına veya OpenAI hesabına bağlanmaz; yerel TCP/HTTP sunucularıyla kayıt, CAP, OPER, PING/PONG, API, dry-run ve ceza gönderimini kontrol eder. Ayrıca SQLite kalıcılığı, eşzamanlı puan güncellemeleri, transaction rollback doğrulanır.
+
+Paketler: [girc](https://github.com/lrstanley/girc), [modernc SQLite](https://modernc.org/sqlite).
 
 Kaynaklar: [OpenAI Moderation](https://developers.openai.com/api/docs/guides/moderation), [UnrealIRCd komutları](https://www.unrealircd.org/docs/User_%26_Oper_commands).

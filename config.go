@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/lrstanley/girc"
 	"io"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,8 +76,13 @@ func loadConfig(path string) (Config, error) {
 	return c, c.validate()
 }
 func (c *Config) validate() error {
-	if _, _, err := net.SplitHostPort(c.IRC.Server); err != nil {
+	host, portText, err := net.SplitHostPort(c.IRC.Server)
+	port, portErr := strconv.Atoi(portText)
+	if err != nil || host == "" || portErr != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("irc.server host:port olmalı")
+	}
+	if !girc.IsValidNick(c.IRC.Nick) || !girc.IsValidUser(c.IRC.User) {
+		return fmt.Errorf("geçersiz IRC nick/user")
 	}
 	for _, s := range []string{c.IRC.Nick, c.IRC.User, c.IRC.OperName, c.IRC.OperPassword} {
 		if !atom(s) {

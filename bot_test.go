@@ -20,7 +20,7 @@ func testConfig(t *testing.T) Config {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c.Moderation.StateFile = filepath.Join(t.TempDir(), "scores.json")
+	c.Moderation.StateFile = filepath.Join(t.TempDir(), "scores.db")
 	return c
 }
 func TestScoringAndPersistence(t *testing.T) {
@@ -37,26 +37,42 @@ func TestScoringAndPersistence(t *testing.T) {
 	if _, _, e = s.add("host:test", 4, now.Add(-25*time.Hour), 24*time.Hour); e != nil {
 		t.Fatal(e)
 	}
-	r, total, e := s.add("host:test", 8, now, 24*time.Hour)
-	if e != nil || total != 8 || len(r.Incidents) != 1 {
-		t.Fatal(r, total, e)
-	}
-	s, e = openStore(c.Moderation.StateFile)
-	if e != nil || s.score("host:test", 24*time.Hour) != 8 {
-		t.Fatal(e)
+	if _, total, e := s.add("host:test", 8, now, 24*time.Hour); e != nil || total != 8 {
+		t.Fatal(total, e)
 	}
 	if e = s.mark("host:test", 10, now); e != nil {
 		t.Fatal(e)
 	}
-	r = s.Records["host:test"]
+	if e = s.Close(); e != nil {
+		t.Fatal(e)
+	}
+	s, e = openStore(c.Moderation.StateFile)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	if total, e := s.score("host:test", 24*time.Hour); e != nil || total != 8 {
+		t.Fatal(total, e)
+	}
+	r, total, e := s.add("host:test", 4, now, 24*time.Hour)
+	if e != nil || total != 12 || r.LastTier != 10 {
+		t.Fatal(r, total, e)
+	}
 	if penaltyFor(c.Moderation.Penalties, 12, r, now, time.Hour) != nil {
 		t.Fatal("cooldown ignored")
 	}
 	if p := penaltyFor(c.Moderation.Penalties, 20, r, now, time.Hour); p == nil || p.Points != 20 {
 		t.Fatal("escalation lost")
 	}
-	if e = s.reset("host:test"); e != nil || s.score("host:test", 24*time.Hour) != 0 {
+	if e = s.reset("host:test"); e != nil {
 		t.Fatal(e)
+	}
+	if total, e := s.score("host:test", 24*time.Hour); e != nil || total != 0 {
+		t.Fatal(total, e)
+	}
+	var n int
+	if e = s.db.QueryRow(`SELECT count(*) FROM incidents`).Scan(&n); e != nil || n != 0 {
+		t.Fatal("cascade reset", n, e)
 	}
 }
 func TestBanTargets(t *testing.T) {
@@ -136,7 +152,7 @@ func TestPermanentPenaltyAndWindow(t *testing.T) {
 }
 
 func TestMalformedStateStopsStartup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "scores.json")
+	path := filepath.Join(t.TempDir(), "scores.db")
 	if e := os.WriteFile(path, []byte("broken"), 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -175,6 +191,7 @@ func TestIRCIntegration(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			defer store.Close()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -204,7 +221,7 @@ func TestIRCIntegration(t *testing.T) {
 				t.Fatal("registration")
 			}
 			write(":server CAP * LS :account-tag")
-			if read() != "CAP REQ :account-tag" {
+			if got, _ := parseMessage(read()); got.Command != "CAP" || len(got.Params) != 2 || got.Params[0] != "REQ" || got.Params[1] != "account-tag" {
 				t.Fatal("cap req")
 			}
 			write(":server CAP * ACK :account-tag")
@@ -220,7 +237,7 @@ func TestIRCIntegration(t *testing.T) {
 				t.Fatal("join")
 			}
 			write("PING :test")
-			if read() != "PONG :test" {
+			if got, _ := parseMessage(read()); got.Command != "PONG" || got.Params[len(got.Params)-1] != "test" {
 				t.Fatal("pong")
 			}
 			write(":user!ident@203.0.113.1 PRIVMSG #sohbet :test message")

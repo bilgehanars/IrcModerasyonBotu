@@ -1,134 +1,112 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-type Incident struct {
-	At     time.Time `json:"at"`
-	Points int       `json:"points"`
-}
 type Record struct {
-	Incidents  []Incident `json:"incidents"`
-	LastAction time.Time  `json:"last_action"`
-	LastTier   int        `json:"last_tier"`
+	LastAction time.Time
+	LastTier   int
 }
 type Store struct {
-	mu      sync.Mutex
-	path    string
-	Records map[string]Record
+	mu sync.Mutex
+	db *sql.DB
 }
 
 func openStore(path string) (*Store, error) {
-	s := &Store{path: path, Records: map[string]Record{}}
-	b, e := os.ReadFile(path)
-	if os.IsNotExist(e) {
-		return s, nil
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
 	}
-	if e != nil {
-		return nil, e
+	// Create with private permissions before SQLite opens the file.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
 	}
-	if e = json.Unmarshal(b, &s.Records); e != nil {
-		return nil, fmt.Errorf("puan dosyası bozuk: %w", e)
+	if err = f.Close(); err != nil {
+		return nil, err
 	}
-	if s.Records == nil {
-		return nil, fmt.Errorf("puan dosyası null olamaz")
+	if err = os.Chmod(path, 0600); err != nil {
+		return nil, err
 	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db}
+	ok := false
+	defer func() {
+		if !ok {
+			db.Close()
+		}
+	}()
+	if _, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+ CREATE TABLE IF NOT EXISTS users (identity TEXT PRIMARY KEY, last_action INTEGER NOT NULL DEFAULT 0, last_tier INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL REFERENCES users(identity) ON DELETE CASCADE, at INTEGER NOT NULL, points INTEGER NOT NULL CHECK(points>0));
+ CREATE INDEX IF NOT EXISTS incidents_identity_at ON incidents(identity, at);
+ CREATE INDEX IF NOT EXISTS incidents_expiry ON incidents(at);`); err != nil {
+		return nil, fmt.Errorf("SQLite başlatılamadı: %w", err)
+	}
+	ok = true
 	return s, nil
 }
-
-// Caller holds mu. Atomic replacement prevents partial state after a crash.
-func (s *Store) save() error {
-	if e := os.MkdirAll(filepath.Dir(s.path), 0700); e != nil {
-		return e
-	}
-	b, e := json.MarshalIndent(s.Records, "", "  ")
-	if e != nil {
-		return e
-	}
-	f, e := os.CreateTemp(filepath.Dir(s.path), ".scores-*")
-	if e != nil {
-		return e
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if e = f.Chmod(0600); e == nil {
-		_, e = f.Write(b)
-	}
-	if e == nil {
-		e = f.Sync()
-	}
-	closeErr := f.Close()
-	if e == nil {
-		e = closeErr
-	}
-	if e != nil {
-		return e
-	}
-	return os.Rename(tmp, s.path)
-}
-func prune(r Record, now time.Time, window time.Duration) (Record, int) {
-	keep := make([]Incident, 0, len(r.Incidents))
-	total := 0
-	for _, v := range r.Incidents {
-		if v.At.After(now.Add(-window)) {
-			keep = append(keep, v)
-			total += v.Points
-		}
-	}
-	r.Incidents = keep
-	return r, total
-}
+func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) add(key string, points int, now time.Time, window time.Duration) (Record, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old := s.Records[key]
-	r, total := prune(old, now, window)
-	r.Incidents = append(r.Incidents, Incident{now, points})
-	s.Records[key] = r
-	if err := s.save(); err != nil {
-		s.Records[key] = old
-		return Record{}, 0, err
+	var r Record
+	tx, err := s.db.Begin()
+	if err != nil {
+		return r, 0, err
 	}
-	return r, total + points, nil
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO users(identity) VALUES(?) ON CONFLICT DO NOTHING`, key); err != nil {
+		return r, 0, err
+	}
+	if _, err = tx.Exec(`DELETE FROM incidents WHERE at<=?`, now.Add(-window).UnixNano()); err != nil {
+		return r, 0, err
+	}
+	if _, err = tx.Exec(`INSERT INTO incidents(identity,at,points) VALUES(?,?,?)`, key, now.UnixNano(), points); err != nil {
+		return r, 0, err
+	}
+	var last int64
+	if err = tx.QueryRow(`SELECT last_action,last_tier FROM users WHERE identity=?`, key).Scan(&last, &r.LastTier); err != nil {
+		return r, 0, err
+	}
+	if last != 0 {
+		r.LastAction = time.Unix(0, last)
+	}
+	var total int
+	if err = tx.QueryRow(`SELECT coalesce(sum(points),0) FROM incidents WHERE identity=? AND at>?`, key, now.Add(-window).UnixNano()).Scan(&total); err != nil {
+		return r, 0, err
+	}
+	return r, total, tx.Commit()
 }
 func (s *Store) mark(key string, tier int, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old := s.Records[key]
-	r := old
-	r.LastAction = now
-	r.LastTier = tier
-	s.Records[key] = r
-	if err := s.save(); err != nil {
-		s.Records[key] = old
-		return err
-	}
-	return nil
+	_, err := s.db.Exec(`INSERT INTO users(identity,last_action,last_tier) VALUES(?,?,?) ON CONFLICT(identity) DO UPDATE SET last_action=excluded.last_action,last_tier=excluded.last_tier`, key, now.UnixNano(), tier)
+	return err
 }
 func (s *Store) reset(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old, ok := s.Records[key]
-	delete(s.Records, key)
-	if e := s.save(); e != nil {
-		if ok {
-			s.Records[key] = old
-		}
-		return e
-	}
-	return nil
+	_, err := s.db.Exec(`DELETE FROM users WHERE identity=?`, key)
+	return err
 }
-func (s *Store) score(key string, window time.Duration) int {
+func (s *Store) score(key string, window time.Duration) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, n := prune(s.Records[key], time.Now(), window)
-	return n
+	var total int
+	err := s.db.QueryRow(`SELECT coalesce(sum(points),0) FROM incidents WHERE identity=? AND at>?`, key, time.Now().Add(-window).UnixNano()).Scan(&total)
+	return total, err
 }
 func penaltyFor(ps []Penalty, total int, r Record, now time.Time, cooldown time.Duration) *Penalty {
 	var selected *Penalty

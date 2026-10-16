@@ -24,7 +24,7 @@
     "max_message_age_seconds": 30,
     "score_window_hours": 24,
     "action_cooldown_seconds": 3600,
-    "state_file": "data/scores.json",
+    "state_file": "data/scores.db",
     "reason": "Otomatik moderasyon: tekrar eden kural ihlali",
     "rules": {
       "harassment": {"threshold": 0.85, "points": 2},
